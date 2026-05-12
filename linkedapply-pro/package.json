@@ -1,0 +1,11 @@
+{
+  "name": "linkedapply-pro",
+  "version": "1.0.0",
+  "description": "LinkedIn Auto-Apply + Gmail Automation Tool",
+  "scripts": {
+    "install:all": "cd backend && npm install && cd ../frontend && npm install",
+    "start:backend": "cd backend && npm run dev",
+    "start:frontend": "cd frontend && npm start",
+    "setup": "node -e \"const fs=require('fs'); fs.mkdirSync('uploads',{recursive:true}); fs.mkdirSync('logs',{recursive:true}); console.log('Folders created');\""
+  }
+}

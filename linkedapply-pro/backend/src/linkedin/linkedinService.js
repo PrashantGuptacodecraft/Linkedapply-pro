@@ -72,8 +72,8 @@ function normalizeLinkedInBrowserError(message) {
     return "Playwright Chromium is not installed. Run `npx playwright install chromium` in the backend folder, then try LinkedIn login again.";
   }
 
-  if (message.includes("ERR_NAME_NOT_RESOLVED") || message.includes("ERR_CONNECTION_RESET")) {
-    return "LinkedIn could not be reached by the Playwright browser. Restart the backend and retry. If your shell sets proxy variables, keep `LINKEDIN_IGNORE_PROXY=true` so the browser connects directly.";
+  if (message.includes("ERR_NAME_NOT_RESOLVED") || message.includes("ERR_CONNECTION_RESET") || message.includes("ERR_CONNECTION_CLOSED")) {
+    return "LinkedIn could not be reached. This may be due to network issues, VPN/proxy interference, or LinkedIn blocking automated access. Try: 1) Disable VPN/proxy, 2) Use a different network, 3) Wait a few minutes and retry, 4) Check if LinkedIn is accessible in a regular browser.";
   }
 
   return message;
@@ -222,41 +222,149 @@ async function launchBrowser() {
   browser = await chromium.launch({
     headless: process.env.LINKEDIN_HEADLESS !== "false",
     env: getPlaywrightLaunchEnv(),
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--no-proxy-server"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--no-proxy-server",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=TranslateUI",
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-popup-blocking",
+      "--disable-extensions",
+      "--disable-default-apps",
+      "--disable-sync",
+      "--disable-translate",
+      "--hide-scrollbars",
+      "--mute-audio",
+      "--no-first-run",
+      "--safebrowsing-disable-auto-update",
+      "--no-default-browser-check",
+      "--disable-dev-shm-usage",
+    ],
   });
   const context = await browser.newContext({
     userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     viewport: { width: 1280, height: 800 },
+    locale: "en-US",
+    timezoneId: "America/New_York",
+    geolocation: { latitude: 40.7128, longitude: -74.0060 }, // New York coordinates
+    extraHTTPHeaders: {
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+      "Accept-Encoding": "gzip, deflate, br",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Cache-Control": "max-age=0",
+      "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+      "Sec-Ch-Ua-Mobile": "?0",
+      "Sec-Ch-Ua-Platform": '"Windows"',
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      "Upgrade-Insecure-Requests": "1",
+    },
+    ignoreHTTPSErrors: true,
+    javaScriptEnabled: true,
   });
   page = await context.newPage();
-  logger.info("Browser launched");
+  page.setDefaultNavigationTimeout(45000);
+  page.setDefaultTimeout(30000);
+
+  // Add some realistic browser properties
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+    });
+
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en'],
+    });
+
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [1, 2, 3, 4, 5],
+    });
+
+    const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+    window.navigator.permissions.query = (parameters) => {
+      if (parameters?.name === 'notifications') {
+        return Promise.resolve({ state: Notification.permission });
+      }
+      return originalQuery(parameters);
+    };
+
+    if (!window.chrome) {
+      window.chrome = {
+        runtime: {},
+        loadTimes: () => ({}),
+        csi: () => ({}),
+        app: {},
+      };
+    }
+
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      get: () => 8,
+    });
+
+    Object.defineProperty(navigator, 'deviceMemory', {
+      get: () => 8,
+    });
+
+    Object.defineProperty(navigator, 'platform', {
+      get: () => 'Win32',
+    });
+  });
+
+  logger.info("Browser launched with stealth options");
   return { browser, page };
 }
 
 async function navigateToLinkedInLogin() {
   let lastError = null;
+  const maxRetries = 3;
 
-  for (const url of LINKEDIN_LOGIN_ENTRY_URLS) {
-    try {
-      logger.info(`Opening LinkedIn entry page: ${url}`);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    for (const url of LINKEDIN_LOGIN_ENTRY_URLS) {
+      try {
+        logger.info(`Opening LinkedIn entry page: ${url} (attempt ${attempt + 1}/${maxRetries})`);
 
-      if (isPostLoginUrl(page.url()) || isChallengeUrl(page.url())) {
-        return;
-      }
+        // Add random delay before navigation (increase with retries)
+        const baseDelay = Math.random() * 2000 + 1000;
+        const retryDelay = attempt * 3000;
+        await page.waitForTimeout(baseDelay + retryDelay);
 
-      const emailField = await waitForVisibleSelector(LINKEDIN_EMAIL_SELECTORS, 8000);
-      if (emailField) {
-        return;
+        await page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 45000,
+          referer: "https://www.google.com/",
+        });
+
+        // Wait a bit after navigation
+        await page.waitForTimeout(Math.random() * 3000 + 2000);
+
+        if (isPostLoginUrl(page.url()) || isChallengeUrl(page.url())) {
+          return;
+        }
+
+        const emailField = await waitForVisibleSelector(LINKEDIN_EMAIL_SELECTORS, 8000);
+        if (emailField) {
+          return;
+        }
+      } catch (err) {
+        lastError = err;
+        logger.warn(`LinkedIn entry navigation failed for ${url}: ${err.message}`);
+        if (isConnectionResetError(err.message)) {
+          await closeBrowser().catch(() => {});
+          await launchBrowser();
+          break; // Try next attempt with fresh browser
+        }
       }
-    } catch (err) {
-      lastError = err;
-      logger.warn(`LinkedIn entry navigation failed for ${url}: ${err.message}`);
-      if (isConnectionResetError(err.message)) {
-        await closeBrowser().catch(() => {});
-        await launchBrowser();
-      }
+    }
+
+    // If we get here, all URLs failed for this attempt
+    if (!isConnectionResetError(lastError?.message || '')) {
+      break; // Don't retry for non-connection errors
     }
   }
 
@@ -500,7 +608,11 @@ async function searchPostsForTerm(term, hoursBack) {
   const searchUrl = buildLinkedInSearchUrl(term);
 
   logger.info(`Searching LinkedIn content for term: "${term}"`);
-  await page.goto(searchUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(searchUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 45000,
+    referer: "https://www.google.com/",
+  });
   await waitForSearchResultsPage();
   await scrollSearchResults();
 
@@ -524,6 +636,19 @@ async function searchPostsForTerm(term, hoursBack) {
 // ── Step 1: Login to LinkedIn ────────────────────────────────
 async function loginLinkedIn(email, password) {
   try {
+    // First check if we can reach LinkedIn
+    try {
+      const axios = require('axios');
+      await axios.get('https://www.linkedin.com', { timeout: 10000 });
+      logger.info("LinkedIn is reachable via HTTP");
+    } catch (networkErr) {
+      logger.warn(`LinkedIn network check failed: ${networkErr.message}`);
+      return {
+        success: false,
+        message: "Cannot reach LinkedIn. Check your internet connection and try again."
+      };
+    }
+
     if (!browser || page?.isClosed()) {
       await launchBrowser();
     }
@@ -550,7 +675,17 @@ async function loginLinkedIn(email, password) {
     }
 
     await page.locator(emailField.selector).nth(emailField.index).fill(email);
+
+    // Add human-like delay before typing password
+    await page.waitForTimeout(Math.random() * 1000 + 500);
+
     await page.locator(passwordField.selector).nth(passwordField.index).fill(password);
+
+    // Add mouse movement to make it more human-like
+    await page.mouse.move(Math.random() * 800 + 200, Math.random() * 600 + 200);
+
+    // Small delay before clicking
+    await page.waitForTimeout(Math.random() * 1500 + 500);
 
     const clicked = await clickVisibleLinkedInSignInButton();
     if (!clicked) {
@@ -627,7 +762,11 @@ async function searchJobPosts(keywords, hoursBack = 24) {
 async function extractEmailFromProfile(profileUrl) {
   try {
     const profilePage = await browser.newPage();
-    await profilePage.goto(profileUrl + "overlay/contact-info/", { waitUntil: "domcontentloaded" });
+    await profilePage.goto(profileUrl + "overlay/contact-info/", {
+      waitUntil: "domcontentloaded",
+      timeout: 45000,
+      referer: "https://www.linkedin.com/",
+    });
     await profilePage.waitForTimeout(2000);
 
     const email = await profilePage.evaluate(() => {

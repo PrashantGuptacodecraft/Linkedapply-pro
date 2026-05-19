@@ -218,9 +218,10 @@ function dedupePosts(posts) {
 }
 
 // ── Launch Browser ───────────────────────────────────────────
-async function launchBrowser() {
+async function launchBrowser(forceVisible = false) {
+  const headless = forceVisible ? false : process.env.LINKEDIN_HEADLESS !== "false";
   browser = await chromium.launch({
-    headless: process.env.LINKEDIN_HEADLESS !== "false",
+    headless,
     env: getPlaywrightLaunchEnv(),
     args: [
       "--no-sandbox",
@@ -316,8 +317,49 @@ async function launchBrowser() {
     });
   });
 
-  logger.info("Browser launched with stealth options");
+  logger.info(`Browser launched ${headless ? '(headless)' : '(visible — complete 2FA in this window)'} with stealth options`);
   return { browser, page };
+}
+
+// ── Wait for user to manually complete 2FA/CAPTCHA ───────────
+const TWO_FA_TIMEOUT_MS = 120000; // 2 minutes
+const TWO_FA_POLL_INTERVAL_MS = 3000;
+
+async function waitForManual2FA() {
+  logger.info(`⏳ 2FA/CAPTCHA detected — a browser window is open. Complete the challenge there within 2 minutes...`);
+
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < TWO_FA_TIMEOUT_MS) {
+    await page.waitForTimeout(TWO_FA_POLL_INTERVAL_MS);
+
+    try {
+      const currentUrl = page.url();
+
+      if (isPostLoginUrl(currentUrl)) {
+        logger.info("✅ 2FA completed — LinkedIn feed reached");
+        return { success: true, message: "Login successful (2FA completed)" };
+      }
+
+      // Check if the page now shows the feed content (sometimes URL doesn't change immediately)
+      const feedVisible = await page.locator(".feed-shared-update-v2, .scaffold-layout__main, .global-nav__me").first().isVisible().catch(() => false);
+      if (feedVisible) {
+        logger.info("✅ 2FA completed — LinkedIn feed content detected");
+        return { success: true, message: "Login successful (2FA completed)" };
+      }
+
+      // Still on challenge page — keep waiting
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      logger.info(`⏳ Waiting for 2FA completion... (${elapsed}s / ${TWO_FA_TIMEOUT_MS / 1000}s)`);
+    } catch (err) {
+      logger.warn(`2FA poll error: ${err.message}`);
+    }
+  }
+
+  return {
+    success: false,
+    message: "2FA/CAPTCHA was not completed within 2 minutes. Please try again.",
+  };
 }
 
 async function navigateToLinkedInLogin() {
@@ -661,9 +703,20 @@ async function loginLinkedIn(email, password) {
       return { success: true, message: "Login successful" };
     }
 
+    // ── 2FA/CAPTCHA before login form ─────────────────────────
     if (isChallengeUrl(page.url())) {
-      logger.warn("2FA / CAPTCHA challenge detected before login form");
-      return { success: false, message: "2FA or CAPTCHA required. Please complete manually." };
+      logger.warn("2FA / CAPTCHA challenge detected before login form — reopening browser in visible mode");
+      await closeBrowser().catch(() => {});
+      await launchBrowser(true); // force visible
+      await navigateToLinkedInLogin();
+
+      if (isPostLoginUrl(page.url())) {
+        return { success: true, message: "Login successful" };
+      }
+
+      if (isChallengeUrl(page.url())) {
+        return await waitForManual2FA();
+      }
     }
 
     const emailField = await waitForVisibleSelector(LINKEDIN_EMAIL_SELECTORS, 10000);
@@ -698,8 +751,30 @@ async function loginLinkedIn(email, password) {
       logger.info("LinkedIn login successful");
       return { success: true, message: "Login successful" };
     } else if (isChallengeUrl(url)) {
-      logger.warn("2FA / CAPTCHA challenge detected");
-      return { success: false, message: "2FA or CAPTCHA required. Please complete manually." };
+      // ── 2FA/CAPTCHA after submitting credentials ─────────────
+      logger.warn("2FA / CAPTCHA challenge detected after login — opening visible browser for manual completion");
+
+      // If we're currently headless, relaunch in visible mode
+      if (process.env.LINKEDIN_HEADLESS !== "false") {
+        await closeBrowser().catch(() => {});
+        await launchBrowser(true); // force visible
+        await navigateToLinkedInLogin();
+
+        // Re-enter credentials in the visible browser
+        const emailField2 = await waitForVisibleSelector(LINKEDIN_EMAIL_SELECTORS, 10000);
+        const passwordField2 = await waitForVisibleSelector(LINKEDIN_PASSWORD_SELECTORS, 5000);
+        if (emailField2 && passwordField2) {
+          await page.locator(emailField2.selector).nth(emailField2.index).fill(email);
+          await page.waitForTimeout(Math.random() * 1000 + 500);
+          await page.locator(passwordField2.selector).nth(passwordField2.index).fill(password);
+          await page.waitForTimeout(Math.random() * 1500 + 500);
+          await clickVisibleLinkedInSignInButton();
+          await waitForLinkedInLoginResult().catch(() => {});
+        }
+      }
+
+      // Now wait for the user to complete 2FA in the visible window
+      return await waitForManual2FA();
     } else {
       const inlineError = await readLinkedInLoginError();
       return {

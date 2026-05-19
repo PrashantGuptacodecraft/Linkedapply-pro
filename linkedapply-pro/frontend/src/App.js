@@ -39,11 +39,11 @@ export default function App() {
     linkedinEmail: "", linkedinPass: "",
     gmailEmail: "", gmailPass: "",
     keywords: "Java Developer, CONTRACT", timeRange: "24",
-    candidateName: "Alex Johnson", candidateTitle: "Senior Java Developer",
+    candidateName: "Prashant Gupta", candidateTitle: "Senior Java Developer",
     candidateSkills: "Java, Spring Boot, Microservices, AWS, Docker",
-    candidateLocation: "Remote / USA", candidateVisa: "H1B / EAD",
-    candidateAvailability: "Immediate", candidatePhone: "+1 (555) 123-4567",
-    candidateEmailContact: "alex.johnson@email.com",
+    candidateLocation: "Remote /India", candidateVisa: "Yes",
+    candidateAvailability: "Immediate", candidatePhone: "+919838693305",
+    candidateEmailContact: "adityagupta983869@email.com",
   });
 
   const addLog = (msg, type = "info") => {

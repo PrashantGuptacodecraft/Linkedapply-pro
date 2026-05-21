@@ -20,31 +20,37 @@ router.post("/login", async (req, res) => {
 
 // POST /api/gmail/send-single
 router.post("/send-single", async (req, res) => {
-  const { fromEmail, recruiterEmail, recruiterName, jobTitle, candidate, resumePath } = req.body;
+  const { fromEmail, recruiterEmail, recruiterName, jobTitle, candidate, resumePath, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, jobDescription, postUrl } = req.body;
   if (!recruiterEmail || !jobTitle || !candidate)
     return res.status(400).json({ error: "Missing required fields" });
 
-  const result = await sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, jobTitle, candidate, resumePath });
+  const result = await sendApplicationEmail({
+    fromEmail, recruiterEmail, recruiterName, jobTitle, candidate, resumePath,
+    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, jobDescription, postUrl,
+  });
   res.json(result);
 });
 
 // POST /api/gmail/send-bulk
 router.post("/send-bulk", async (req, res) => {
-  const { fromEmail, recruiters, candidate, resumePath } = req.body;
+  const { fromEmail, recruiters, candidate, resumePath, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail } = req.body;
   if (!recruiters || !Array.isArray(recruiters) || recruiters.length === 0)
     return res.status(400).json({ error: "Recruiters array required" });
 
   logger.info(`Bulk send: ${recruiters.length} emails`);
-  const results = await sendBulkEmails({ fromEmail, recruiters, candidate, resumePath });
+  const results = await sendBulkEmails({
+    fromEmail, recruiters, candidate, resumePath,
+    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail,
+  });
   const sent = results.filter((r) => r.success).length;
   res.json({ success: true, total: recruiters.length, sent, failed: recruiters.length - sent, results });
 });
 
 // POST /api/gmail/preview
 router.post("/preview", (req, res) => {
-  const { recruiterName, jobTitle, candidate } = req.body;
+  const { candidate, teamLeadName, teamLeadEmail, jobDescription } = req.body;
   const { buildEmailBody } = require("./gmailService");
-  const body = buildEmailBody(recruiterName || "Recruiter", jobTitle || "Job Title", candidate || {});
+  const body = buildEmailBody(candidate || {}, teamLeadName || "", teamLeadEmail || "", jobDescription || "");
   res.json({ preview: body });
 });
 

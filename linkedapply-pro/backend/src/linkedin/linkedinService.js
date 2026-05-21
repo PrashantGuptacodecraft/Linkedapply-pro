@@ -219,7 +219,7 @@ function dedupePosts(posts) {
 
 // ── Launch Browser ───────────────────────────────────────────
 async function launchBrowser(forceVisible = false) {
-  const headless = forceVisible ? false : process.env.LINKEDIN_HEADLESS !== "false";
+  const headless = false; // User requested to see the browser process
   browser = await chromium.launch({
     headless,
     env: getPlaywrightLaunchEnv(),
@@ -539,6 +539,10 @@ async function collectVisiblePosts() {
       "a[href*='/company/']",
       "a.app-aware-link",
     ];
+    const postUrlSelectors = [
+      "a[href*='/update/urn:li:']",
+      "a[href*='/posts/']",
+    ];
     const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
     const timeRegex = /\b\d+\s*[smhdw]\b/i;
     const nodes = [];
@@ -611,6 +615,7 @@ async function collectVisiblePosts() {
       const authorName = pickAuthorName(el);
       const postedTime = pickPostedTime(el);
       const profileUrl = pickHref(el, profileSelectors);
+      const postUrl = pickHref(el, postUrlSelectors);
       const fullText = el.innerText || "";
       const emails = fullText.match(emailRegex) || [];
 
@@ -618,6 +623,7 @@ async function collectVisiblePosts() {
         authorName,
         postedTime,
         profileUrl,
+        postUrl,
         postText,
         recruiterEmail: emails[0] || null,
         fullEmails: emails,

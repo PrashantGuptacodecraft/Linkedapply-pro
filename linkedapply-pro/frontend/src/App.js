@@ -64,6 +64,8 @@ export default function App() {
     // Email Config
     ccEmails: "",
     bccEmails: "",
+    teamLeadName: "",
+    teamLeadEmail: "",
   });
 
   // Close keyword dropdown on outside click
@@ -203,6 +205,8 @@ export default function App() {
         ccEmails: config.ccEmails,
         bccEmails: config.bccEmails,
         skillLabel: selectedKw.skillLabel,
+        teamLeadName: config.teamLeadName,
+        teamLeadEmail: config.teamLeadEmail,
       });
       const { sent, failed, results } = res.data;
       results.forEach((r) => {
@@ -382,9 +386,23 @@ export default function App() {
 
           <Sec title="📧 Email Configuration">
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9 }}>
+              <div>
+                <Lbl>Team Lead Name</Lbl>
+                <input className="ifield" placeholder="Team Lead Full Name" value={config.teamLeadName} onChange={e => setConfig(p => ({...p,teamLeadName:e.target.value}))} />
+              </div>
+              <div>
+                <Lbl>Team Lead Email</Lbl>
+                <input className="ifield" placeholder="teamlead@gmail.com" value={config.teamLeadEmail} onChange={e => setConfig(p => ({...p,teamLeadEmail:e.target.value}))} />
+              </div>
               <div style={{ gridColumn: "1/-1" }}>
-                <Lbl>Cc (Optional)</Lbl>
-                <input className="ifield" placeholder="email1@gmail.com; email2@gmail.com" value={config.ccEmails} onChange={e => setConfig(p => ({...p,ccEmails:e.target.value}))} />
+                <Lbl>Auto Cc (always included)</Lbl>
+                <div className="ifield" style={{ background: "transparent", opacity: 0.7, cursor: "default", fontSize: 12 }}>
+                  {[config.candidateEmailContact, config.teamLeadEmail].filter(Boolean).join(" ; ") || "—"}
+                </div>
+              </div>
+              <div style={{ gridColumn: "1/-1" }}>
+                <Lbl>Additional Cc (Optional)</Lbl>
+                <input className="ifield" placeholder="extra1@gmail.com; extra2@gmail.com" value={config.ccEmails} onChange={e => setConfig(p => ({...p,ccEmails:e.target.value}))} />
               </div>
               <div style={{ gridColumn: "1/-1" }}>
                 <Lbl>Bcc (Optional)</Lbl>
@@ -429,9 +447,10 @@ export default function App() {
 
           <Sec title="📝 Email Template Preview">
             <div style={{ background: COLORS.surface, borderRadius: 4, padding: 12, fontFamily: "monospace", fontSize: 12, color: COLORS.text, overflowY: "auto" }}>
-              <div style={{ color: COLORS.accent, marginBottom: 4, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>To: Recruiter Email Id</div>
-              {config.ccEmails && <div style={{ color: COLORS.accent2, marginBottom: 4, fontSize: 10 }}>Cc: {config.ccEmails}</div>}
-              {config.bccEmails && <div style={{ color: COLORS.muted, marginBottom: 4, fontSize: 10 }}>Bcc: {config.bccEmails}</div>}
+              {/* Headers */}
+              <div style={{ color: COLORS.accent, marginBottom: 3, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>To: <span style={{ color: COLORS.text, textTransform: "none" }}>Recruiter Email Id</span></div>
+              <div style={{ color: COLORS.accent, marginBottom: 3, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>Cc: <span style={{ color: COLORS.text, textTransform: "none", fontWeight: 400 }}>{[config.candidateEmailContact, config.teamLeadEmail].filter(Boolean).join(" ; ") || "—"}{config.ccEmails ? " ; " + config.ccEmails : ""}</span></div>
+              <div style={{ color: COLORS.accent, marginBottom: 3, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>Bcc: <span style={{ color: COLORS.muted, textTransform: "none" }}>{config.bccEmails || "—"}</span></div>
               <div style={{ color: COLORS.yellow, marginBottom: 8, fontSize: 10 }}>Subject: {generateSubject()}</div>
               <div style={{ borderTop: `1px solid ${COLORS.border}`, paddingTop: 10 }}>
                 <div style={{ color: COLORS.text }}>Hi,</div>
@@ -456,14 +475,15 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <div style={{ marginTop: 16, color: COLORS.text }}>I am actively looking for Contract / C2C roles and am available to start immediately.</div>
+                <div style={{ marginTop: 14, color: COLORS.text }}>I am actively looking for Contract / C2C roles and am available to start immediately. I would love the opportunity to discuss how my background aligns with your requirements.</div>
                 <div style={{ marginTop: 8, color: COLORS.text }}>Thank you for your time and consideration. I look forward to hearing from you.</div>
-                <div style={{ marginTop: 12, color: COLORS.muted, fontSize: 11 }}>
-                  <strong style={{ color: COLORS.text }}>Post Link:</strong>{" "}
+                {/* Post Link before Regards */}
+                <div style={{ marginTop: 12, color: COLORS.text, fontSize: 12 }}>
+                  <strong>Post Link:</strong>{" "}
                   <span style={{ color: COLORS.accent, fontStyle: "italic" }}>[Recruiter&apos;s LinkedIn post URL]</span>
                 </div>
-                <div style={{ marginTop: 12, color: COLORS.text }}>Regards,</div>
-                <div style={{ color: COLORS.accent, fontWeight: 600 }}>{candidate.name}</div>
+                <div style={{ marginTop: 14, color: COLORS.text }}>Regards,</div>
+                <div style={{ marginTop: 4, color: COLORS.accent, fontWeight: 600 }}>{candidate.name}</div>
               </div>
             </div>
           </Sec>

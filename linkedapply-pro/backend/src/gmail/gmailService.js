@@ -39,7 +39,7 @@ async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, 
       return { success: false, message: "Gmail not authenticated. Call /login first." };
     }
 
-    const emailBody = buildEmailBody(candidate, jobDescription, postUrl);
+    const emailBody = buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail);
     const location = candidate.location || "Location";
     const skill = skillLabel || jobTitle || "Candidate";
     const subject = `Submission "${skill}" Local to "${location}"`;
@@ -48,18 +48,23 @@ async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, 
       from: `"${candidate.name}" <${fromEmail}>`,
       to: recruiterEmail,
       subject,
-      text: buildPlainTextFallback(candidate, jobDescription, postUrl),
+      text: buildPlainTextFallback(candidate, jobDescription, postUrl, teamLeadEmail),
       html: emailBody,
       attachments: resumePath && fs.existsSync(resumePath)
         ? [{ filename: path.basename(resumePath), path: resumePath }]
         : [],
     };
 
-    // Add CC
-    if (ccEmails) {
-      const ccList = ccEmails.split(";").map(e => e.trim()).filter(Boolean);
-      if (ccList.length > 0) mailOptions.cc = ccList;
-    }
+    // Auto-CC: candidate email + team lead email + any extra CC emails
+    const autoCc = [
+      candidate.email,
+      teamLeadEmail,
+    ].filter(Boolean);
+    const extraCc = ccEmails
+      ? ccEmails.split(";").map(e => e.trim()).filter(Boolean)
+      : [];
+    const fullCc = [...new Set([...autoCc, ...extraCc])];
+    if (fullCc.length > 0) mailOptions.cc = fullCc;
 
     // Add BCC
     if (bccEmails) {
@@ -110,7 +115,7 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, cc
 }
 
 // ── Email Template (Simple Clean Format) ──────────────────────
-function buildEmailBody(candidate, jobDescription, postUrl) {
+function buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail) {
   const linkedInHtml = candidate.linkedIn
     ? `<a href="${candidate.linkedIn}" style="color:#0ea5e9;text-decoration:none;">${candidate.linkedIn}</a>`
     : "";
@@ -118,9 +123,9 @@ function buildEmailBody(candidate, jobDescription, postUrl) {
     ? `<a href="mailto:${candidate.email}" style="color:#0ea5e9;text-decoration:none;">${candidate.email}</a>`
     : "";
 
-  // Post link shown just before Regards
+  // Post Link shown before Regards
   const postUrlHtml = postUrl
-    ? `<p style="font-size:14px;color:#1e293b;line-height:1.7;margin:16px 0 4px;"><strong>Post Link:</strong> <a href="${postUrl}" style="color:#0ea5e9;text-decoration:none;">${postUrl}</a></p>`
+    ? `<p style="font-size:14px;color:#1e293b;line-height:1.7;margin:16px 0 10px;"><strong>Post Link:</strong> <a href="${postUrl}" style="color:#0ea5e9;text-decoration:none;">${postUrl}</a></p>`
     : "";
 
   return `<!DOCTYPE html>
@@ -147,7 +152,7 @@ function buildEmailBody(candidate, jobDescription, postUrl) {
     </table>
 
     <p style="font-size:14px;color:#1e293b;line-height:1.7;margin:22px 0 10px;">I am actively looking for Contract / C2C roles and am available to start immediately. I would love the opportunity to discuss how my background aligns with your requirements.</p>
-    <p style="font-size:14px;color:#1e293b;line-height:1.7;margin:0 0 20px;">Thank you for your time and consideration. I look forward to hearing from you.</p>
+    <p style="font-size:14px;color:#1e293b;line-height:1.7;margin:0 0 6px;">Thank you for your time and consideration. I look forward to hearing from you.</p>
 
     ${postUrlHtml}
 
@@ -160,7 +165,7 @@ function buildEmailBody(candidate, jobDescription, postUrl) {
 }
 
 // ── Plain Text Fallback ────────────────────────────────────────
-function buildPlainTextFallback(candidate, jobDescription, postUrl) {
+function buildPlainTextFallback(candidate, jobDescription, postUrl, teamLeadEmail) {
   const postUrlText = postUrl ? `\nPost Link: ${postUrl}\n` : "";
   return `Hi,
 
@@ -184,6 +189,7 @@ I am actively looking for Contract / C2C roles and am available to start immedia
 Thank you for your time and consideration. I look forward to hearing from you.
 ${postUrlText}
 Regards,
+
 ${candidate.name || ""}`;
 }
 

@@ -183,18 +183,59 @@ async function saveLinkedInSnapshot(prefix) {
   return snapshotPath;
 }
 
-function buildSearchTerms(keywords) {
-  const terms = keywords
-    .split(/[\n,|]+/)
-    .map((term) => term.trim())
-    .filter(Boolean);
+function generateKeywordVariations(keyword) {
+  // Parse out the base skill and any tags like C2C, remote, etc.
+  const parts = keyword.split(/[+&,|]+/).map((p) => p.trim()).filter(Boolean);
+  const skill = parts[0] || keyword; // e.g. "JAVA DEVELOPER"
+  const tag = parts[1] || ""; // e.g. "C2C"
 
-  return [...new Set(terms)].slice(0, 5);
+  const skillClean = skill.trim();
+  const tagClean = tag.trim();
+
+  const variations = new Set();
+
+  // Base combinations
+  variations.add(keyword.trim());
+  if (tagClean) {
+    variations.add(`${skillClean} ${tagClean}`);
+    variations.add(`${skillClean} corp to corp`);
+    variations.add(`${skillClean} contract`);
+    variations.add(`${skillClean} contract to hire`);
+  }
+
+  // Common recruiter post patterns
+  variations.add(`${skillClean} hiring`);
+  variations.add(`${skillClean} requirement`);
+  variations.add(`${skillClean} opening`);
+  variations.add(`${skillClean} position`);
+  variations.add(`${skillClean} opportunity`);
+  variations.add(`${skillClean} urgent requirement`);
+  variations.add(`${skillClean} job`);
+
+  // With Senior/Lead prefix
+  const words = skillClean.split(/\s+/);
+  if (words.length > 0 && !words[0].toLowerCase().startsWith("senior")) {
+    variations.add(`Senior ${skillClean}${tagClean ? " " + tagClean : ""}`);
+    variations.add(`Senior ${skillClean} hiring`);
+  }
+
+  return [...variations].slice(0, 8); // Max 8 variations per keyword
 }
 
-function buildLinkedInSearchUrl(term) {
+function buildSearchTerms(keywords) {
+  // If keywords contains separators (newline, comma, pipe), treat as explicit list
+  const explicit = keywords.split(/[\n|]+/).map((t) => t.trim()).filter(Boolean);
+  if (explicit.length > 1) {
+    return [...new Set(explicit)].slice(0, 5);
+  }
+  // Single keyword — auto-expand into variations
+  return generateKeywordVariations(keywords);
+}
+
+function buildLinkedInSearchUrl(term, start = 0) {
   const query = encodeURIComponent(term);
-  return `https://www.linkedin.com/search/results/content/?keywords=${query}&origin=GLOBAL_SEARCH_HEADER`;
+  // datePosted filter: loads recent posts first so time filtering is efficient
+  return `https://www.linkedin.com/search/results/content/?keywords=${query}&origin=GLOBAL_SEARCH_HEADER&datePosted=%22past-24h%22&start=${start}`;
 }
 
 function dedupePosts(posts) {
@@ -489,19 +530,24 @@ async function waitForSearchResultsPage() {
   ).catch(() => {});
 }
 
-async function scrollSearchResults() {
+async function scrollSearchResults(maxScrolls = 40) {
   let lastHeight = 0;
+  let noChangeCount = 0;
 
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < maxScrolls; i++) {
     const currentHeight = await page.evaluate(() => {
-      window.scrollBy(0, window.innerHeight * 0.9);
+      window.scrollBy(0, window.innerHeight * 0.85);
       return document.body.scrollHeight;
     });
 
-    await page.waitForTimeout(1200);
+    // Wait a bit longer to allow LinkedIn's lazy-load to fetch more posts
+    await page.waitForTimeout(1500);
 
     if (currentHeight === lastHeight) {
-      break;
+      noChangeCount++;
+      if (noChangeCount >= 3) break; // Truly no more content
+    } else {
+      noChangeCount = 0;
     }
 
     lastHeight = currentHeight;
@@ -652,33 +698,79 @@ async function saveSearchSnapshot(term) {
   return snapshotPath;
 }
 
-async function searchPostsForTerm(term, hoursBack) {
-  const searchUrl = buildLinkedInSearchUrl(term);
+async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
+  const allPosts = [];
+  const seenTexts = new Set();
+  const MAX_PAGES = 15; // LinkedIn content search: ~10 results per page start
 
-  logger.info(`Searching LinkedIn content for term: "${term}"`);
-  await page.goto(searchUrl, {
-    waitUntil: "domcontentloaded",
-    timeout: 45000,
-    referer: "https://www.google.com/",
-  });
-  await waitForSearchResultsPage();
-  await scrollSearchResults();
+  for (let pageIndex = 0; pageIndex < MAX_PAGES; pageIndex++) {
+    const start = pageIndex * 10;
+    const searchUrl = buildLinkedInSearchUrl(term, start);
 
-  const scraped = await collectVisiblePosts();
-  const filteredPosts = scraped.posts.filter((post) => isWithinHours(post.postedTime, hoursBack));
+    logger.info(`Searching LinkedIn: "${term}" (page ${pageIndex + 1}, start=${start})`);
 
-  logger.info(
-    `Search term "${term}" yielded ${filteredPosts.length} posts; selectors=${JSON.stringify(scraped.selectorCounts)}`
-  );
+    try {
+      await page.goto(searchUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 45000,
+        referer: "https://www.google.com/",
+      });
+    } catch (navErr) {
+      logger.warn(`Navigation failed for "${term}" page ${pageIndex + 1}: ${navErr.message}`);
+      break;
+    }
 
-  if (scraped.posts.length === 0) {
-    const snapshotPath = await saveSearchSnapshot(term);
-    logger.warn(
-      `No post containers were scraped for "${term}". Snapshot saved to ${snapshotPath}. Page title="${scraped.title}". URL=${scraped.url}`
+    await waitForSearchResultsPage();
+
+    // Scroll more on first page; less on subsequent pages (they load fresh content)
+    const scrollCount = pageIndex === 0 ? 40 : 20;
+    await scrollSearchResults(scrollCount);
+
+    const scraped = await collectVisiblePosts();
+
+    if (scraped.posts.length === 0) {
+      if (pageIndex === 0) {
+        const snapshotPath = await saveSearchSnapshot(term);
+        logger.warn(
+          `No post containers for "${term}" page 1. Snapshot saved: ${snapshotPath}. Title="${scraped.title}" URL=${scraped.url}`
+        );
+      } else {
+        logger.info(`No posts on page ${pageIndex + 1} for "${term}" — stopping pagination`);
+      }
+      break;
+    }
+
+    let newOnPage = 0;
+    for (const post of scraped.posts) {
+      if (!isWithinHours(post.postedTime, hoursBack)) continue;
+      const dedupKey = (post.postText || "").slice(0, 100) + (post.profileUrl || "");
+      if (seenTexts.has(dedupKey)) continue;
+      seenTexts.add(dedupKey);
+      allPosts.push({ ...post, matchedKeyword: term });
+      newOnPage++;
+    }
+
+    logger.info(
+      `"${term}" page ${pageIndex + 1}: ${scraped.posts.length} scraped, ${newOnPage} new within ${hoursBack}h. Total so far: ${allPosts.length}`
     );
+
+    // Stop if no new in-time posts were found on this page (older posts dominate)
+    if (newOnPage === 0 && pageIndex > 0) {
+      logger.info(`No new posts within ${hoursBack}h on page ${pageIndex + 1} for "${term}" — stopping`);
+      break;
+    }
+
+    // Stop if we've hit the target
+    if (allPosts.length >= targetCount) {
+      logger.info(`Reached target of ${targetCount} posts for "${term}"`);
+      break;
+    }
+
+    // Small pause between pages to be polite
+    await page.waitForTimeout(1000 + Math.random() * 1000);
   }
 
-  return filteredPosts.map((post) => ({ ...post, matchedKeyword: term }));
+  return allPosts;
 }
 
 // ── Step 1: Login to LinkedIn ────────────────────────────────
@@ -808,26 +900,58 @@ async function searchJobPosts(keywords, hoursBack = 24) {
     }
 
     const searchTerms = buildSearchTerms(keywords);
-    const collectedPosts = [];
+    const allCollected = [];
+    const globalSeenKeys = new Set();
+    const globalSeenEmails = new Set(); // Tracks emails already found in post text
 
-    logger.info(`Searching posts: "${keywords}" (last ${hoursBack}h)`);
+    logger.info(`Searching posts: "${keywords}" (last ${hoursBack}h) — ${searchTerms.length} keyword variation(s)`);
+    logger.info(`Variations: ${searchTerms.join(" | ")}`);
 
     for (const term of searchTerms) {
-      const termPosts = await searchPostsForTerm(term, hoursBack);
-      collectedPosts.push(...termPosts);
+      const termPosts = await searchPostsForTerm(term, hoursBack, 500);
+
+      for (const post of termPosts) {
+        const key = [
+          post.profileUrl || "",
+          post.recruiterEmail || "",
+          (post.postText || "").slice(0, 120),
+        ].join("::");
+        if (!globalSeenKeys.has(key)) {
+          globalSeenKeys.add(key);
+          // Track emails found directly in post text
+          if (post.recruiterEmail) globalSeenEmails.add(post.recruiterEmail);
+          allCollected.push(post);
+        }
+      }
+
+      logger.info(`Running total after "${term}": ${allCollected.length} unique posts`);
+
+      if (allCollected.length >= 500) {
+        logger.info("Reached 500 unique posts — stopping keyword search early");
+        break;
+      }
     }
 
-    const filteredPosts = dedupePosts(collectedPosts);
-
-    logger.info(`Found ${filteredPosts.length} unique posts within ${hoursBack}h across ${searchTerms.length} term(s)`);
+    logger.info(`Found ${allCollected.length} unique posts within ${hoursBack}h across ${searchTerms.length} variation(s)`);
 
     // For posts without email, try to visit their profile
     const enriched = [];
-    for (const post of filteredPosts.slice(0, 20)) {
+    const profileEnrichmentLimit = 500;
+    for (const post of allCollected.slice(0, profileEnrichmentLimit)) {
       if (!post.recruiterEmail && post.profileUrl) {
         const profileEmail = await extractEmailFromProfile(post.profileUrl);
-        post.recruiterEmail = profileEmail;
+        if (profileEmail) {
+          if (globalSeenEmails.has(profileEmail)) {
+             // Already have this email, skip duplicates
+             continue;
+          }
+          globalSeenEmails.add(profileEmail);
+          post.recruiterEmail = profileEmail;
+        }
       }
+      enriched.push(post);
+    }
+    for (const post of allCollected.slice(profileEnrichmentLimit)) {
       enriched.push(post);
     }
 
@@ -839,27 +963,49 @@ async function searchJobPosts(keywords, hoursBack = 24) {
   }
 }
 
-// ── Helper: Extract Email from Profile Page ───────────────────
+// ── Helper: Extract Email from Profile Page ─────────────────────
 async function extractEmailFromProfile(profileUrl) {
+  let profilePage = null;
   try {
-    const profilePage = await browser.newPage();
-    await profilePage.goto(profileUrl + "overlay/contact-info/", {
-      waitUntil: "domcontentloaded",
-      timeout: 45000,
-      referer: "https://www.linkedin.com/",
-    });
-    await profilePage.waitForTimeout(2000);
+    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const baseUrl = profileUrl.endsWith("/") ? profileUrl : profileUrl + "/";
 
-    const email = await profilePage.evaluate(() => {
-      const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-      const text = document.body.innerText;
-      const matches = text.match(emailRegex);
-      return matches ? matches[0] : null;
-    });
+    profilePage = await browser.newPage();
+
+    // Strategy 1: Contact-info overlay
+    try {
+      await profilePage.goto(baseUrl + "overlay/contact-info/", {
+        waitUntil: "domcontentloaded",
+        timeout: 20000,
+        referer: "https://www.linkedin.com/",
+      });
+      await profilePage.waitForTimeout(2000);
+      const contactText = await profilePage.evaluate(() => document.body.innerText);
+      const contactMatches = contactText.match(emailRegex) || [];
+      const found1 = contactMatches.find((e) => !e.includes("linkedin.com"));
+      if (found1) { await profilePage.close(); return found1; }
+    } catch { /* fall through */ }
+
+    // Strategy 2: Full profile page text scan
+    try {
+      await profilePage.goto(baseUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 20000,
+        referer: "https://www.linkedin.com/",
+      });
+      await profilePage.waitForTimeout(1500);
+      await profilePage.evaluate(() => window.scrollBy(0, 800));
+      await profilePage.waitForTimeout(800);
+      const profileText = await profilePage.evaluate(() => document.body.innerText);
+      const profileMatches = profileText.match(emailRegex) || [];
+      const found2 = profileMatches.find((e) => !e.includes("linkedin.com") && !e.includes("sentry.io"));
+      if (found2) { await profilePage.close(); return found2; }
+    } catch { /* fall through */ }
 
     await profilePage.close();
-    return email;
+    return null;
   } catch {
+    if (profilePage) await profilePage.close().catch(() => {});
     return null;
   }
 }

@@ -33,17 +33,40 @@ router.post("/send-single", async (req, res) => {
 
 // POST /api/gmail/send-bulk
 router.post("/send-bulk", async (req, res) => {
-  const { fromEmail, recruiters, candidate, resumePath, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail } = req.body;
+  const {
+    fromEmail, recruiters, candidate, resumePath, resumeRawText,
+    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring,
+  } = req.body;
   if (!recruiters || !Array.isArray(recruiters) || recruiters.length === 0)
     return res.status(400).json({ error: "Recruiters array required" });
 
-  logger.info(`Bulk send: ${recruiters.length} emails`);
+  const MAX_BULK_EMAILS = 500;
+  let processedRecruiters = recruiters;
+  let dropped = 0;
+  if (recruiters.length > MAX_BULK_EMAILS) {
+    dropped = recruiters.length - MAX_BULK_EMAILS;
+    processedRecruiters = recruiters.slice(0, MAX_BULK_EMAILS);
+    logger.warn(`Recruiter list truncated to ${MAX_BULK_EMAILS} emails per run. ${dropped} recruiters were dropped.`);
+  }
+
+  logger.info(`Bulk send: ${processedRecruiters.length} emails (requested ${recruiters.length}, AI tailoring: ${!!useTailoring}, resumeText: ${resumeRawText ? resumeRawText.length + " chars" : "none"})`);
   const results = await sendBulkEmails({
-    fromEmail, recruiters, candidate, resumePath,
-    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail,
+    fromEmail, recruiters: processedRecruiters, candidate, resumePath, resumeRawText,
+    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring,
   });
-  const sent = results.filter((r) => r.success).length;
-  res.json({ success: true, total: recruiters.length, sent, failed: recruiters.length - sent, results });
+  const sent   = results.filter((r) => r.success).length;
+  const tailoredPdfCount = results.filter((r) => r.tailoredResume).length;
+  res.json({
+    success: true,
+    total: recruiters.length,
+    processed: processedRecruiters.length,
+    dropped,
+    sent,
+    failed: processedRecruiters.length - sent,
+    tailoredPdfCount,
+    results,
+    message: dropped ? `Max 500 emails per run. Sent first ${processedRecruiters.length} recruiters.` : undefined,
+  });
 });
 
 // POST /api/gmail/preview

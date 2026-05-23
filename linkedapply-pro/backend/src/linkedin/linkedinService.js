@@ -81,8 +81,18 @@ function normalizeLinkedInBrowserError(message) {
 
 function isWithinHours(postedTime = "", hoursBack = 24) {
   const value = postedTime.trim().toLowerCase();
-  const match = value.match(/(\d+)\s*([smhdw])/);
 
+  // Distinguish month from minute
+  if (value.includes("month")) {
+    const match = value.match(/(\d+)\s*month/);
+    if (match) {
+      const months = Number(match[1]);
+      return months * 30 * 24 <= hoursBack;
+    }
+    return false;
+  }
+
+  const match = value.match(/(\d+)\s*([smhdw])/);
   if (!match) {
     return true;
   }
@@ -90,7 +100,12 @@ function isWithinHours(postedTime = "", hoursBack = 24) {
   const amount = Number(match[1]);
   const unit = match[2];
 
-  if (unit === "s" || unit === "m") {
+  if (unit === "s") {
+    return true;
+  }
+
+  if (unit === "m") {
+    // If it's just minutes, it's definitely within hoursBack
     return true;
   }
 
@@ -183,7 +198,7 @@ async function saveLinkedInSnapshot(prefix) {
   return snapshotPath;
 }
 
-function generateKeywordVariations(keyword) {
+function generateKeywordVariations(keyword, location, workAuth = "") {
   // Parse out the base skill and any tags like C2C, remote, etc.
   const parts = keyword.split(/[+&,|]+/).map((p) => p.trim()).filter(Boolean);
   const skill = parts[0] || keyword; // e.g. "JAVA DEVELOPER"
@@ -191,51 +206,72 @@ function generateKeywordVariations(keyword) {
 
   const skillClean = skill.trim();
   const tagClean = tag.trim();
+  
+  const locSuffix = location ? ` ${location.trim()}` : "";
+  const authSuffix = workAuth ? ` ${workAuth.trim()}` : "";
+
+  // If Work Auth is specified (e.g. USA, H1B), use it as the primary search target 
+  // to avoid getting local results when applying internationally.
+  const primarySuffix = workAuth ? authSuffix : locSuffix;
 
   const variations = new Set();
 
-  // Base combinations
-  variations.add(keyword.trim());
+  // Base combinations using primary suffix
+  variations.add((keyword.trim() + primarySuffix).trim());
   if (tagClean) {
-    variations.add(`${skillClean} ${tagClean}`);
-    variations.add(`${skillClean} corp to corp`);
-    variations.add(`${skillClean} contract`);
-    variations.add(`${skillClean} contract to hire`);
+    variations.add((`${skillClean} ${tagClean}` + primarySuffix).trim());
+    variations.add((`${skillClean} corp to corp` + primarySuffix).trim());
+    variations.add((`${skillClean} contract` + primarySuffix).trim());
+    variations.add((`${skillClean} contract to hire` + primarySuffix).trim());
   }
 
   // Common recruiter post patterns
-  variations.add(`${skillClean} hiring`);
-  variations.add(`${skillClean} requirement`);
-  variations.add(`${skillClean} opening`);
-  variations.add(`${skillClean} position`);
-  variations.add(`${skillClean} opportunity`);
-  variations.add(`${skillClean} urgent requirement`);
-  variations.add(`${skillClean} job`);
+  variations.add((`${skillClean} hiring` + primarySuffix).trim());
+  variations.add((`${skillClean} requirement` + primarySuffix).trim());
+  variations.add((`${skillClean} opening` + primarySuffix).trim());
+  variations.add((`${skillClean} position` + primarySuffix).trim());
+  variations.add((`${skillClean} opportunity` + primarySuffix).trim());
+  variations.add((`${skillClean} urgent requirement` + primarySuffix).trim());
+  variations.add((`${skillClean} job` + primarySuffix).trim());
+  variations.add((`${skillClean} remote`).trim());
+  variations.add((`${skillClean} immediate joiner`).trim());
+
+  // Include location as a secondary fallback just in case
+  if (workAuth && location) {
+    variations.add((`${skillClean} hiring` + locSuffix).trim());
+    variations.add((keyword.trim() + locSuffix).trim());
+  }
 
   // With Senior/Lead prefix
   const words = skillClean.split(/\s+/);
   if (words.length > 0 && !words[0].toLowerCase().startsWith("senior")) {
-    variations.add(`Senior ${skillClean}${tagClean ? " " + tagClean : ""}`);
-    variations.add(`Senior ${skillClean} hiring`);
+    variations.add((`Senior ${skillClean}${tagClean ? " " + tagClean : ""}` + primarySuffix).trim());
+    variations.add((`Senior ${skillClean} hiring` + primarySuffix).trim());
   }
 
-  return [...variations].slice(0, 8); // Max 8 variations per keyword
+  return [...variations].slice(0, 15); // Max 15 variations per keyword
 }
 
-function buildSearchTerms(keywords) {
+function buildSearchTerms(keywords, location, workAuth = "") {
   // If keywords contains separators (newline, comma, pipe), treat as explicit list
   const explicit = keywords.split(/[\n|]+/).map((t) => t.trim()).filter(Boolean);
   if (explicit.length > 1) {
-    return [...new Set(explicit)].slice(0, 5);
+    const locSuffix = location ? ` ${location.trim()}` : "";
+    return [...new Set(explicit)].map(t => (t + locSuffix).trim()).slice(0, 5);
   }
   // Single keyword — auto-expand into variations
-  return generateKeywordVariations(keywords);
+  return generateKeywordVariations(keywords, location, workAuth);
 }
 
-function buildLinkedInSearchUrl(term, start = 0) {
+function buildLinkedInSearchUrl(term, start = 0, hoursBack = 24) {
   const query = encodeURIComponent(term);
-  // datePosted filter: loads recent posts first so time filtering is efficient
-  return `https://www.linkedin.com/search/results/content/?keywords=${query}&origin=GLOBAL_SEARCH_HEADER&datePosted=%22past-24h%22&start=${start}`;
+  let dateFilter = "past-24h";
+  if (hoursBack > 24 && hoursBack <= 168) {
+    dateFilter = "past-week";
+  } else if (hoursBack > 168) {
+    dateFilter = "past-month";
+  }
+  return `https://www.linkedin.com/search/results/content/?keywords=${query}&origin=GLOBAL_SEARCH_HEADER&datePosted=%22${dateFilter}%22&sortBy=%22datePosted%22&start=${start}`;
 }
 
 function dedupePosts(posts) {
@@ -530,7 +566,7 @@ async function waitForSearchResultsPage() {
   ).catch(() => {});
 }
 
-async function scrollSearchResults(maxScrolls = 40) {
+async function scrollSearchResults(maxScrolls = 5) {
   let lastHeight = 0;
   let noChangeCount = 0;
 
@@ -540,12 +576,11 @@ async function scrollSearchResults(maxScrolls = 40) {
       return document.body.scrollHeight;
     });
 
-    // Wait a bit longer to allow LinkedIn's lazy-load to fetch more posts
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(1000);
 
     if (currentHeight === lastHeight) {
       noChangeCount++;
-      if (noChangeCount >= 3) break; // Truly no more content
+      if (noChangeCount >= 2) break; // Truly no more content
     } else {
       noChangeCount = 0;
     }
@@ -663,17 +698,27 @@ async function collectVisiblePosts() {
       const profileUrl = pickHref(el, profileSelectors);
       let postUrl = "";
 
-      // 1. Try to find a link that is explicitly a post URL
+      // 1. Try to find a link that is explicitly a post URL by scanning all anchors
       const allLinks = Array.from(el.querySelectorAll("a"));
       for (const a of allLinks) {
         const href = a.href || "";
-        if (href.includes("/feed/update/urn:li:") || href.includes("/posts/") || href.includes("/update/urn:li:")) {
-          postUrl = href;
+        const attrHref = a.getAttribute("href") || "";
+        if (
+          href.includes("/feed/update/") ||
+          href.includes("/posts/") ||
+          href.includes("/update/") ||
+          href.includes("/activity/") ||
+          attrHref.includes("/feed/update/") ||
+          attrHref.includes("/posts/") ||
+          attrHref.includes("/update/") ||
+          attrHref.includes("/activity/")
+        ) {
+          postUrl = href || attrHref;
           break;
         }
       }
 
-      // 2. Try to find URN attribute from the node or children
+      // 2. Try to find URN attribute from the node, its children, or its ancestors
       if (!postUrl) {
         let postUrn = el.getAttribute("data-urn") || el.getAttribute("data-id") || el.getAttribute("data-chameleon-result-urn");
         if (!postUrn) {
@@ -682,29 +727,53 @@ async function collectVisiblePosts() {
             postUrn = urnEl.getAttribute("data-urn") || urnEl.getAttribute("data-id") || urnEl.getAttribute("data-chameleon-result-urn");
           }
         }
+        if (!postUrn) {
+          const closestUrnEl = el.closest("[data-urn], [data-id], [data-chameleon-result-urn]");
+          if (closestUrnEl) {
+            postUrn = closestUrnEl.getAttribute("data-urn") || closestUrnEl.getAttribute("data-id") || closestUrnEl.getAttribute("data-chameleon-result-urn");
+          }
+        }
 
         if (postUrn) {
-          const activityMatch = postUrn.match(/activity:(\d+)/);
-          const shareMatch = postUrn.match(/share:(\d+)/);
-          const directMatch = postUrn.match(/(\d{15,25})/);
-
-          if (activityMatch) {
-            postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityMatch[1]}`;
-          } else if (shareMatch) {
-            postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${shareMatch[1]}`;
-          } else if (postUrn.startsWith("urn:li:activity:")) {
+          if (postUrn.startsWith("urn:li:")) {
             postUrl = `https://www.linkedin.com/feed/update/${postUrn}`;
-          } else if (directMatch) {
-            postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${directMatch[1]}`;
+          } else {
+            const activityMatch = postUrn.match(/activity:(\d+)/);
+            const shareMatch = postUrn.match(/share:(\d+)/);
+            const directMatch = postUrn.match(/(\d{15,25})/);
+
+            if (activityMatch) {
+              postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityMatch[1]}`;
+            } else if (shareMatch) {
+              postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${shareMatch[1]}`;
+            } else if (directMatch) {
+              postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${directMatch[1]}`;
+            }
           }
         }
       }
 
       // 3. Fallback: look for timestamp or subdescription links
       if (!postUrl) {
-        const timeLink = el.querySelector("a.app-aware-link:has(time), .update-components-actor__sub-description-link, a[aria-label*='ago']");
+        const timeLink = el.querySelector("a[href*='/update/'], a[href*='/posts/'], a.app-aware-link:has(time), a.update-components-actor__sub-description-link, a[aria-label*='ago']");
         if (timeLink && timeLink.href) {
           postUrl = timeLink.href;
+        }
+      }
+
+      // 4. Try looking for timestamp anchors specifically
+      if (!postUrl) {
+        const timeRegex = /^\s*\d+\s*[smhdw]\s*$/i;
+        const timeWordRegex = /ago|month|year/i;
+        for (const a of allLinks) {
+          const text = (a.innerText || "").trim();
+          if (timeRegex.test(text) || timeWordRegex.test(text)) {
+            const href = a.href || a.getAttribute("href");
+            if (href && (href.includes("/feed/update/") || href.includes("/posts/") || href.includes("/update/") || href.includes("/activity/"))) {
+              postUrl = href;
+              break;
+            }
+          }
         }
       }
 
@@ -751,11 +820,12 @@ async function saveSearchSnapshot(term) {
 async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
   const allPosts = [];
   const seenTexts = new Set();
-  const MAX_PAGES = 15; // LinkedIn content search: ~10 results per page start
+  const MAX_PAGES = 100; // Scan up to 100 pages (LinkedIn's absolute search limit)
+  let consecutiveZeroNewPages = 0;
 
   for (let pageIndex = 0; pageIndex < MAX_PAGES; pageIndex++) {
     const start = pageIndex * 10;
-    const searchUrl = buildLinkedInSearchUrl(term, start);
+    const searchUrl = buildLinkedInSearchUrl(term, start, hoursBack);
 
     logger.info(`Searching LinkedIn: "${term}" (page ${pageIndex + 1}, start=${start})`);
 
@@ -773,7 +843,7 @@ async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
     await waitForSearchResultsPage();
 
     // Scroll more on first page; less on subsequent pages (they load fresh content)
-    const scrollCount = pageIndex === 0 ? 40 : 20;
+    const scrollCount = pageIndex === 0 ? 5 : 3;
     await scrollSearchResults(scrollCount);
 
     const scraped = await collectVisiblePosts();
@@ -787,6 +857,13 @@ async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
       } else {
         logger.info(`No posts on page ${pageIndex + 1} for "${term}" — stopping pagination`);
       }
+      break;
+    }
+
+    // Stop immediately if all posts on this page are older than hoursBack
+    const hasAnyWithinHours = scraped.posts.some(post => isWithinHours(post.postedTime, hoursBack));
+    if (!hasAnyWithinHours) {
+      logger.info(`All posts on page ${pageIndex + 1} are older than ${hoursBack}h — stopping pagination for "${term}"`);
       break;
     }
 
@@ -804,10 +881,15 @@ async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
       `"${term}" page ${pageIndex + 1}: ${scraped.posts.length} scraped, ${newOnPage} new within ${hoursBack}h. Total so far: ${allPosts.length}`
     );
 
-    // Stop if no new in-time posts were found on this page (older posts dominate)
+    // Stop if we found 0 new posts on this page for 2 consecutive pages (since it is sorted by latest)
     if (newOnPage === 0 && pageIndex > 0) {
-      logger.info(`No new posts within ${hoursBack}h on page ${pageIndex + 1} for "${term}" — stopping`);
-      break;
+      consecutiveZeroNewPages++;
+      if (consecutiveZeroNewPages >= 2) {
+        logger.info(`No new posts within ${hoursBack}h for 2 consecutive pages for "${term}" — stopping pagination`);
+        break;
+      }
+    } else {
+      consecutiveZeroNewPages = 0;
     }
 
     // Stop if we've hit the target
@@ -819,7 +901,6 @@ async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
     // Small pause between pages to be polite
     await page.waitForTimeout(1000 + Math.random() * 1000);
   }
-
   return allPosts;
 }
 
@@ -939,7 +1020,7 @@ async function loginLinkedIn(email, password) {
 }
 
 // ── Step 2: Search LinkedIn Posts ────────────────────────────
-async function searchJobPosts(keywords, hoursBack = 24) {
+async function searchJobPosts(keywords, hoursBack = 24, location = "", workAuth = "") {
   try {
     if (!page) {
       return {
@@ -949,16 +1030,16 @@ async function searchJobPosts(keywords, hoursBack = 24) {
       };
     }
 
-    const searchTerms = buildSearchTerms(keywords);
+    const searchTerms = buildSearchTerms(keywords, location, workAuth);
     const allCollected = [];
     const globalSeenKeys = new Set();
     const globalSeenEmails = new Set(); // Tracks emails already found in post text
 
-    logger.info(`Searching posts: "${keywords}" (last ${hoursBack}h) — ${searchTerms.length} keyword variation(s)`);
+    logger.info(`Searching posts: "${keywords}" in "${location || "Anywhere"}" (last ${hoursBack}h) — ${searchTerms.length} keyword variation(s)`);
     logger.info(`Variations: ${searchTerms.join(" | ")}`);
 
     for (const term of searchTerms) {
-      const termPosts = await searchPostsForTerm(term, hoursBack, 500);
+      const termPosts = await searchPostsForTerm(term, hoursBack, 1000);
 
       for (const post of termPosts) {
         const key = [
@@ -976,8 +1057,8 @@ async function searchJobPosts(keywords, hoursBack = 24) {
 
       logger.info(`Running total after "${term}": ${allCollected.length} unique posts`);
 
-      if (allCollected.length >= 500) {
-        logger.info("Reached 500 unique posts — stopping keyword search early");
+      if (allCollected.length >= 1000) {
+        logger.info("Reached 1000 unique posts — stopping keyword search early");
         break;
       }
     }
@@ -986,17 +1067,46 @@ async function searchJobPosts(keywords, hoursBack = 24) {
 
     // For posts without email, try to visit their profile
     const enriched = [];
-    const profileEnrichmentLimit = 500;
+    const profileEnrichmentLimit = 1000;
+    let challengeDetected = false;
+
+    const postsToEnrich = allCollected.slice(0, profileEnrichmentLimit).filter(p => !p.recruiterEmail && p.profileUrl);
+    logger.info(`[LinkedIn] Found ${postsToEnrich.length} posts without emails in text. Starting profile enrichment (max limit ${profileEnrichmentLimit})...`);
+
+    let enrichCounter = 0;
     for (const post of allCollected.slice(0, profileEnrichmentLimit)) {
-      if (!post.recruiterEmail && post.profileUrl) {
-        const profileEmail = await extractEmailFromProfile(post.profileUrl);
-        if (profileEmail) {
-          if (globalSeenEmails.has(profileEmail)) {
-             // Already have this email, skip duplicates
-             continue;
+      if (!post.recruiterEmail && post.profileUrl && !challengeDetected) {
+        enrichCounter++;
+        logger.info(`[LinkedIn] Visiting profile ${enrichCounter}/${postsToEnrich.length}: ${post.profileUrl}`);
+
+        if (page?.url().includes("/checkpoint") || page?.url().includes("/challenge")) {
+          logger.warn("[LinkedIn] Security challenge detected on main page. Skipping profile enrichment.");
+          challengeDetected = true;
+        } else {
+          try {
+            // Add random delay to look human
+            await page.waitForTimeout(1000 + Math.random() * 2000);
+            
+            const profileEmail = await extractEmailFromProfile(post.profileUrl);
+            if (profileEmail) {
+              if (globalSeenEmails.has(profileEmail)) {
+                 logger.info(`[LinkedIn] Found email: ${profileEmail} (already seen, skipping)`);
+                 continue;
+              }
+              logger.info(`[LinkedIn] Found email: ${profileEmail} for profile: ${post.profileUrl}`);
+              globalSeenEmails.add(profileEmail);
+              post.recruiterEmail = profileEmail;
+            } else {
+              logger.info(`[LinkedIn] No email found on profile: ${post.profileUrl}`);
+            }
+          } catch (err) {
+            if (err.message === "CHALLENGE_DETECTED") {
+              logger.warn("[LinkedIn] Security challenge detected during profile scan. Halting further profile enrichment.");
+              challengeDetected = true;
+            } else {
+              logger.error(`[LinkedIn] Error scanning profile ${post.profileUrl}: ${err.message}`);
+            }
           }
-          globalSeenEmails.add(profileEmail);
-          post.recruiterEmail = profileEmail;
         }
       }
       enriched.push(post);
@@ -1021,41 +1131,48 @@ async function extractEmailFromProfile(profileUrl) {
     const baseUrl = profileUrl.endsWith("/") ? profileUrl : profileUrl + "/";
 
     profilePage = await browser.newPage();
+    profilePage.setDefaultTimeout(15000);
 
-    // Strategy 1: Contact-info overlay
-    try {
-      await profilePage.goto(baseUrl + "overlay/contact-info/", {
-        waitUntil: "domcontentloaded",
-        timeout: 20000,
-        referer: "https://www.linkedin.com/",
-      });
-      await profilePage.waitForTimeout(2000);
-      const contactText = await profilePage.evaluate(() => document.body.innerText);
-      const contactMatches = contactText.match(emailRegex) || [];
-      const found1 = contactMatches.find((e) => !e.includes("linkedin.com"));
-      if (found1) { await profilePage.close(); return found1; }
-    } catch { /* fall through */ }
+    // Navigate to contact-info overlay directly (loads profile page with overlay open in background)
+    await profilePage.goto(baseUrl + "overlay/contact-info/", {
+      waitUntil: "domcontentloaded",
+      timeout: 15000,
+      referer: "https://www.linkedin.com/",
+    });
+    
+    if (profilePage.url().includes("/checkpoint") || profilePage.url().includes("/challenge")) {
+      throw new Error("CHALLENGE_DETECTED");
+    }
 
-    // Strategy 2: Full profile page text scan
-    try {
-      await profilePage.goto(baseUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 20000,
-        referer: "https://www.linkedin.com/",
-      });
-      await profilePage.waitForTimeout(1500);
-      await profilePage.evaluate(() => window.scrollBy(0, 800));
-      await profilePage.waitForTimeout(800);
-      const profileText = await profilePage.evaluate(() => document.body.innerText);
-      const profileMatches = profileText.match(emailRegex) || [];
-      const found2 = profileMatches.find((e) => !e.includes("linkedin.com") && !e.includes("sentry.io"));
-      if (found2) { await profilePage.close(); return found2; }
-    } catch { /* fall through */ }
+    // Wait for overlay content to render
+    await profilePage.waitForTimeout(2000);
 
-    await profilePage.close();
-    return null;
-  } catch {
+    // Strategy 1: Scan entire page text (contains overlay modal text)
+    let text = await profilePage.evaluate(() => document.body.innerText);
+    let matches = text.match(emailRegex) || [];
+    let found = matches.find((e) => !e.includes("linkedin.com") && !e.includes("sentry.io"));
+    if (found) {
+      await profilePage.close().catch(() => {});
+      return found;
+    }
+
+    // Strategy 2: Close overlay modal (Escape) and scroll down to render About/Featured sections
+    await profilePage.keyboard.press("Escape").catch(() => {});
+    await profilePage.waitForTimeout(500);
+    await profilePage.evaluate(() => window.scrollBy(0, 1000)).catch(() => {});
+    await profilePage.waitForTimeout(1000);
+
+    text = await profilePage.evaluate(() => document.body.innerText);
+    matches = text.match(emailRegex) || [];
+    found = matches.find((e) => !e.includes("linkedin.com") && !e.includes("sentry.io"));
+
+    await profilePage.close().catch(() => {});
+    return found || null;
+  } catch (err) {
     if (profilePage) await profilePage.close().catch(() => {});
+    if (err.message === "CHALLENGE_DETECTED") {
+      throw err;
+    }
     return null;
   }
 }

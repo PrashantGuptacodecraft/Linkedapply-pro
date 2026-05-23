@@ -18,10 +18,21 @@ async function extractTextFromResume(filePath) {
   const ext = path.extname(filePath).toLowerCase();
 
   if (ext === ".pdf") {
-    const pdfParse = require("pdf-parse");
+    const pdf = require("pdf-parse");
     const buffer = fs.readFileSync(filePath);
-    const data = await pdfParse(buffer);
-    return data.text || "";
+    if (typeof pdf === "function") {
+      const data = await pdf(buffer);
+      return data.text || "";
+    } else if (pdf && typeof pdf.PDFParse === "function") {
+      const parser = new pdf.PDFParse({ data: buffer });
+      const result = await parser.getText();
+      return result.text || "";
+    } else if (pdf && pdf.default && typeof pdf.default === "function") {
+      const data = await pdf.default(buffer);
+      return data.text || "";
+    } else {
+      throw new Error("Unable to find a valid PDF parsing function in pdf-parse module.");
+    }
   }
 
   if (ext === ".docx") {
@@ -84,6 +95,17 @@ Return ONLY the JSON object, nothing else.`;
     // Strip any markdown fences if model added them
     const cleaned = response.replace(/```json\n?/gi, "").replace(/```\n?/gi, "").trim();
     const parsed = JSON.parse(cleaned);
+
+    // Sanitize parsed LinkedIn URL
+    if (parsed.candidateLinkedIn) {
+      let li = parsed.candidateLinkedIn.trim().replace(/^[|\s\-:\[\]\(\)]+|[|\s\-:\[\]\(\)]+$/g, "").trim();
+      if (li.toLowerCase().includes("linkedin.com") && li.length > 10) {
+        parsed.candidateLinkedIn = li.startsWith("http") ? li : "https://" + li;
+      } else {
+        parsed.candidateLinkedIn = "";
+      }
+    }
+
     logger.info(`[ResumeParser] Extracted profile for: ${parsed.candidateName || "Unknown"}`);
     return { success: true, profile: parsed };
   } catch (err) {

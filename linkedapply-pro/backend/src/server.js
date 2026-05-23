@@ -130,6 +130,21 @@ app.get("/api/latest-resume", (req, res) => {
   }
 });
 
+// ── Server Logs Endpoint (Polling for UI Console) ────────────
+app.get("/api/logs", (req, res) => {
+  try {
+    const logPath = path.resolve(__dirname, "../../logs/app.log");
+    if (!fs.existsSync(logPath)) {
+      return res.json({ logs: [] });
+    }
+    const content = fs.readFileSync(logPath, "utf8");
+    const lines = content.split("\n").filter(Boolean);
+    res.json({ logs: lines.slice(-100) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Health Check ─────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
   res.json({ status: "OK", timestamp: new Date().toISOString() });

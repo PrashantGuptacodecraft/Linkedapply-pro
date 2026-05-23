@@ -11,8 +11,8 @@ const BASE = "/api";
 export const linkedinLogin = (email, password) =>
   axios.post(`${BASE}/linkedin/login`, { email, password });
 
-export const linkedinSearch = (keywords, hoursBack) =>
-  axios.post(`${BASE}/linkedin/search`, { keywords, hoursBack }, { timeout: 60 * 60 * 1000 }); // 60 min — scraping takes time
+export const linkedinSearch = (keywords, hoursBack, location, workAuth) =>
+  axios.post(`${BASE}/linkedin/search`, { keywords, hoursBack, location, workAuth }, { timeout: 60 * 60 * 1000 }); // 60 min — scraping takes time
 
 export const linkedinLogout = () =>
   axios.post(`${BASE}/linkedin/logout`);
@@ -52,3 +52,6 @@ export const previewResume = (profile, targetRole) =>
 
 // ── Auto-detect latest uploaded resume ────────────────────────
 export const getLatestResume = () => axios.get(`${BASE}/latest-resume`);
+
+// ── Poll Server Logs ──────────────────────────────────────────
+export const getLogs = () => axios.get(`${BASE}/logs`);

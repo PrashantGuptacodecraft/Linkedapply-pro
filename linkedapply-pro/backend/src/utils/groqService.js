@@ -10,7 +10,7 @@ const { getProjectsForRole, getSkillsForRole } = require("./projectBank");
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama3-8b-8192"; // Fast, cheap, very capable
+const MODEL = "llama-3.1-8b-instant"; // Fast, cheap, very capable, replaces decommissioned llama3-8b-8192
 
 /**
  * Call Groq API and return the assistant message text.

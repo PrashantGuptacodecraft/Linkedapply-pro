@@ -35,13 +35,13 @@ async function loginGmail(gmailUser, gmailAppPassword) {
 }
 
 // ── Step 4: Send Application Email ───────────────────────────
-async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, jobTitle, candidate, resumePath, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, jobDescription, postUrl, tailoredPitch, tailoredSkills, tailoredProjects }) {
+async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, jobTitle, candidate, resumePath, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, jobDescription, postUrl, recruiterProfileUrl, tailoredPitch, tailoredSkills, tailoredProjects }) {
   try {
     if (!transporter) {
       return { success: false, message: "Gmail not authenticated. Call /login first." };
     }
 
-    const emailBody = buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects);
+    const emailBody = buildEmailBody(candidate, jobDescription, postUrl, recruiterProfileUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects);
     const location = candidate.location || "Location";
     const skill = skillLabel || jobTitle || "Candidate";
     const subject = `Submission "${skill}" Local to "${location}"`;
@@ -50,7 +50,7 @@ async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, 
       from: `"${candidate.name}" <${fromEmail}>`,
       to: recruiterEmail,
       subject,
-      text: buildPlainTextFallback(candidate, jobDescription, postUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects),
+      text: buildPlainTextFallback(candidate, jobDescription, postUrl, recruiterProfileUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects),
       html: emailBody,
       attachments: resumePath && fs.existsSync(resumePath)
         ? [{ filename: path.basename(resumePath), path: resumePath }]
@@ -90,9 +90,11 @@ async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, 
 }
 
 // ── Bulk Send to Multiple Recruiters ─────────────────────────
-async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, resumeRawText, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring }) {
+// ── Bulk Send to Multiple Recruiters ─────────────────────────
+async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, resumeRawText, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring, useTailorResume }) {
   const results = [];
   let tailoringEnabled = useTailoring;
+  const resumeTailorEnabled = useTailorResume !== false;
 
   if (useTailoring && !process.env.GROQ_API_KEY) {
     logger.warn("[Groq] AI tailoring requested but GROQ_API_KEY is not set — falling back to offline/hardcoded generation if available.");
@@ -100,7 +102,7 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
 
   // ── Extract resume structure ONCE per batch (AI call, expensive) ─
   let resumeStructure = null;
-  if (tailoringEnabled && resumeRawText && resumeRawText.trim().length > 50) {
+  if (resumeTailorEnabled && resumeRawText && resumeRawText.trim().length > 50) {
     logger.info("[ResumeTailor] Extracting resume structure for batch tailoring...");
     const extracted = await extractStructureFromRawText(resumeRawText);
     if (extracted.success && extracted.structure) {
@@ -121,7 +123,7 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
   }
 
   // Fallback to candidate profile if resume structure is empty (e.g. auto-loaded without raw text)
-  if (!resumeStructure && tailoringEnabled) {
+  if (!resumeStructure && resumeTailorEnabled) {
     resumeStructure = {
       name: candidate.name,
       email: candidate.email,
@@ -136,41 +138,41 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
     logger.info("[ResumeTailor] Generated fallback resume structure from candidate profile.");
   }
 
+  // ── Master AI Tailoring (Generated ONCE per bulk run) ──
+  let masterTailoredPitch = null;
+  let masterTailoredSkills = null;
+  let masterTailoredProjectsList = [];
+  let masterAttachResumePath = resumePath;
+  let masterIsTailoredPdf = false;
+
+  if (tailoringEnabled) {
+    logger.info(`[Groq] Generating single master tailored pitch for role: ${skillLabel}...`);
+    // Tailor strictly using the role/skill (domain filter) instead of a specific job description
+    const tailored = await tailorForJob(candidate, "", skillLabel);
+    masterTailoredPitch  = tailored.tailoredPitch;
+    masterTailoredSkills = tailored.tailoredSkills;
+  }
+
+  if (resumeTailorEnabled && resumeStructure) {
+    logger.info(`[ResumeTailor] Generating single master tailored PDF for role: ${skillLabel}...`);
+    const pdfResult = await buildTailoredResumePDF(
+      resumeStructure,
+      "", // No specific JD
+      "master",
+      skillLabel
+    );
+    if (pdfResult.success && pdfResult.path && fs.existsSync(pdfResult.path)) {
+      masterAttachResumePath = pdfResult.path;
+      masterIsTailoredPdf = true;
+      masterTailoredProjectsList = pdfResult.relevantProjects || [];
+      logger.info(`[ResumeTailor] Master PDF ready: ${pdfResult.filename}`);
+    }
+  }
+
   let jobCounter = 0;
 
   for (const recruiter of recruiters) {
     jobCounter++;
-    let tailoredPitch  = null;
-    let tailoredSkills = null;
-    let tailoredProjectsList = [];   // AI-selected projects filtered by role
-    let attachResumePath = resumePath; // default: original PDF
-    let isTailoredPdf = false;
-
-    if (tailoringEnabled) {
-      // ── Always tailor using role + job description ───────────────────────
-      // skillLabel (e.g. "Data Analyst") is the domain filter.
-      // Even when job description is empty the AI filters strictly by role.
-      const tailored = await tailorForJob(candidate, recruiter.jobDescription || "", skillLabel);
-      tailoredPitch  = tailored.tailoredPitch;
-      tailoredSkills = tailored.tailoredSkills;
-
-      // ── Generate role-filtered tailored PDF resume ───────────────────────
-      if (resumeStructure) {
-        const pdfResult = await buildTailoredResumePDF(
-          resumeStructure,
-          recruiter.jobDescription || "",
-          jobCounter,
-          skillLabel   // AI uses this as the domain filter
-        );
-        if (pdfResult.success && pdfResult.path && fs.existsSync(pdfResult.path)) {
-          attachResumePath = pdfResult.path;
-          isTailoredPdf = true;
-          // Role-filtered projects go into the email body
-          tailoredProjectsList = pdfResult.relevantProjects || [];
-          logger.info(`[ResumeTailor] Attaching role-filtered PDF for "${skillLabel}": ${pdfResult.filename}`);
-        }
-      }
-    }
 
     const result = await sendApplicationEmail({
       fromEmail,
@@ -178,23 +180,24 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
       recruiterName: recruiter.name,
       jobTitle: recruiter.jobTitle,
       candidate,
-      resumePath: attachResumePath,
+      resumePath: masterAttachResumePath,
       ccEmails,
       bccEmails,
       skillLabel,
       teamLeadName,
       teamLeadEmail,
       jobDescription: recruiter.jobDescription || "",
-      postUrl: recruiter.postUrl || "",
-      tailoredPitch,
-      tailoredSkills,
-      tailoredProjects: tailoredProjectsList,
+      postUrl: recruiter.postUrl || (recruiter.name ? `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(recruiter.name)}` : "https://www.linkedin.com"),
+      recruiterProfileUrl: recruiter.profileUrl || "",
+      tailoredPitch: masterTailoredPitch,
+      tailoredSkills: masterTailoredSkills,
+      tailoredProjects: masterTailoredProjectsList,
     });
     results.push({
       ...result,
       recruiter: recruiter.name,
-      tailored: tailoringEnabled && !!tailoredPitch,
-      tailoredResume: isTailoredPdf,
+      tailored: tailoringEnabled && !!masterTailoredPitch,
+      tailoredResume: masterIsTailoredPdf,
     });
 
     // Small delay between sends to avoid spam detection
@@ -204,7 +207,7 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
 }
 
 // ── Email Template (Simple Clean Format) ─────────────────
-function buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects) {
+function buildEmailBody(candidate, jobDescription, postUrl, recruiterProfileUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects) {
   const emailHtml = candidate.email ? `<a href="mailto:${candidate.email}" style="color:#2563eb;text-decoration:none;">${candidate.email}</a>` : "";
   const linkedInHtml = candidate.linkedIn ? `<a href="${candidate.linkedIn}" style="color:#2563eb;text-decoration:none;">${candidate.linkedIn}</a>` : "";
   const postUrlHtml = postUrl ? `<a href="${postUrl}" style="color:#2563eb;text-decoration:none;">${postUrl}</a>` : "";
@@ -232,7 +235,7 @@ function buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail, tailo
       ${candidate.salary ? `<tr><td style="padding-right:14px;font-weight:600;">Salary:</td><td>${candidate.salary}</td></tr>` : ""}
     </table>
 
-    ${postUrlHtml ? `<p style="font-size:14px;color:#1e293b;line-height:1.7;margin:16px 0 16px;">Job description  link as per linkedin post: ${postUrlHtml}</p>` : ""}
+    ${postUrlHtml ? `<p style="font-size:14px;color:#1e293b;line-height:1.7;margin:16px 0 16px;">Job description link as per linkedin post: ${postUrlHtml}</p>` : ""}
     <p style="font-size:14px;color:#1e293b;line-height:1.7;margin:0 0 4px;">Regards</p>
     <p style="font-size:14px;color:#1e293b;margin:0;">${candidate.name || ""}</p>
     ${teamLeadEmail ? `<p style="font-size:14px;color:#1e293b;margin:4px 0 0;">${teamLeadEmail}</p>` : ""}
@@ -243,8 +246,8 @@ function buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail, tailo
 }
 
 // ── Plain Text Fallback ────────────────────────────────────────
-function buildPlainTextFallback(candidate, jobDescription, postUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects) {
-  const postUrlText = postUrl ? `Job description  link as per linkedin post: ${postUrl}\n\n` : "";
+function buildPlainTextFallback(candidate, jobDescription, postUrl, recruiterProfileUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects) {
+  const postUrlText = postUrl ? `Job description link as per linkedin post: ${postUrl}\n\n` : "";
 
   return `Hi,
 Hope you are doing well,

@@ -35,12 +35,12 @@ router.post("/send-single", async (req, res) => {
 router.post("/send-bulk", async (req, res) => {
   const {
     fromEmail, recruiters, candidate, resumePath, resumeRawText,
-    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring,
+    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring, useTailorResume,
   } = req.body;
   if (!recruiters || !Array.isArray(recruiters) || recruiters.length === 0)
     return res.status(400).json({ error: "Recruiters array required" });
 
-  const MAX_BULK_EMAILS = 500;
+  const MAX_BULK_EMAILS = 1000;
   let processedRecruiters = recruiters;
   let dropped = 0;
   if (recruiters.length > MAX_BULK_EMAILS) {
@@ -49,10 +49,10 @@ router.post("/send-bulk", async (req, res) => {
     logger.warn(`Recruiter list truncated to ${MAX_BULK_EMAILS} emails per run. ${dropped} recruiters were dropped.`);
   }
 
-  logger.info(`Bulk send: ${processedRecruiters.length} emails (requested ${recruiters.length}, AI tailoring: ${!!useTailoring}, resumeText: ${resumeRawText ? resumeRawText.length + " chars" : "none"})`);
+  logger.info(`Bulk send: ${processedRecruiters.length} emails (requested ${recruiters.length}, AI tailoring: ${!!useTailoring}, AI resume: ${!!useTailorResume}, resumeText: ${resumeRawText ? resumeRawText.length + " chars" : "none"})`);
   const results = await sendBulkEmails({
     fromEmail, recruiters: processedRecruiters, candidate, resumePath, resumeRawText,
-    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring,
+    ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring, useTailorResume,
   });
   const sent   = results.filter((r) => r.success).length;
   const tailoredPdfCount = results.filter((r) => r.tailoredResume).length;
@@ -65,18 +65,19 @@ router.post("/send-bulk", async (req, res) => {
     failed: processedRecruiters.length - sent,
     tailoredPdfCount,
     results,
-    message: dropped ? `Max 500 emails per run. Sent first ${processedRecruiters.length} recruiters.` : undefined,
+    message: dropped ? `Max 1000 emails per run. Sent first ${processedRecruiters.length} recruiters.` : undefined,
   });
 });
 
 // POST /api/gmail/preview
 router.post("/preview", (req, res) => {
-  const { candidate, teamLeadName, teamLeadEmail, jobDescription, postUrl } = req.body;
+  const { candidate, teamLeadName, teamLeadEmail, jobDescription, postUrl, recruiterProfileUrl } = req.body;
   const { buildEmailBody } = require("./gmailService");
   const body = buildEmailBody(
     candidate || {},
     jobDescription || "",
     postUrl || "",
+    recruiterProfileUrl || "",
     teamLeadEmail || "",
     null,
     null,

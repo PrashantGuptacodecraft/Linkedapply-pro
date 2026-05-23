@@ -73,17 +73,24 @@ function testEmailBody() {
   console.log("\n\n=== TESTING EMAIL BODY WITH POST URL ===\n");
   
   const postUrl = "https://www.linkedin.com/feed/update/urn:li:activity:1234567890";
+  const recruiterProfileUrl = "https://www.linkedin.com/in/recruiter-profile";
   const teamLeadEmail = "teamlead@example.com";
   
-  const htmlBody = buildEmailBody(testCandidate, "Sample job description", postUrl, teamLeadEmail, null, null, []);
-  const plainBody = buildPlainTextFallback(testCandidate, "Sample job description", postUrl, teamLeadEmail, null, null, []);
+  const htmlBody = buildEmailBody(testCandidate, "Sample job description", postUrl, recruiterProfileUrl, teamLeadEmail, null, null, []);
+  const plainBody = buildPlainTextFallback(testCandidate, "Sample job description", postUrl, recruiterProfileUrl, teamLeadEmail, null, null, []);
   
   // Check if postUrl is in the email
   const hasPostUrlInHtml = htmlBody.includes(postUrl);
   const hasPostUrlInPlain = plainBody.includes(postUrl);
   
+  // Check if recruiterProfileUrl is in the email
+  const hasProfileUrlInHtml = htmlBody.includes(recruiterProfileUrl);
+  const hasProfileUrlInPlain = plainBody.includes(recruiterProfileUrl);
+  
   console.log(`  HTML body contains postUrl: ${hasPostUrlInHtml ? "✅ YES" : "❌ NO"}`);
   console.log(`  Plain body contains postUrl: ${hasPostUrlInPlain ? "✅ YES" : "❌ NO"}`);
+  console.log(`  HTML body contains recruiterProfileUrl: ${hasProfileUrlInHtml ? "✅ YES" : "❌ NO"}`);
+  console.log(`  Plain body contains recruiterProfileUrl: ${hasProfileUrlInPlain ? "✅ YES" : "❌ NO"}`);
   
   // Check that candidate details are present
   const hasName = htmlBody.includes(testCandidate.name);
@@ -97,6 +104,7 @@ function testEmailBody() {
   console.log(`  Has candidate LinkedIn: ${hasLinkedIn ? "✅" : "❌"}`);
   console.log(`  Has team lead email: ${htmlBody.includes(teamLeadEmail) ? "✅" : "❌"}`);
   console.log(`  Has "Job description link as per linkedin post": ${htmlBody.includes("Job description  link as per linkedin post") ? "✅" : "❌"}`);
+  console.log(`  Has "Recruiter profile link": ${htmlBody.includes("Recruiter profile link") ? "✅" : "❌"}`);
   
   // Print the relevant snippet
   const postSnippetIdx = htmlBody.indexOf("Job description");

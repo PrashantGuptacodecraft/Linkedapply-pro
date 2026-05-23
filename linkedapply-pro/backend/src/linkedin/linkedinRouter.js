@@ -21,12 +21,12 @@ router.post("/login", async (req, res) => {
 
 // POST /api/linkedin/search
 router.post("/search", async (req, res) => {
-  const { keywords, hoursBack = 24 } = req.body;
+  const { keywords, hoursBack = 24, location, workAuth } = req.body;
   if (!keywords)
     return res.status(400).json({ error: "Keywords required" });
 
-  logger.info(`Job search: "${keywords}" last ${hoursBack}h`);
-  const result = await searchJobPosts(keywords, hoursBack);
+  logger.info(`Job search: "${keywords}" in "${location || "Anywhere"}" last ${hoursBack}h (workAuth: ${workAuth || "any"})`);
+  const result = await searchJobPosts(keywords, hoursBack, location, workAuth || "");
   res.json(result);
 });
 

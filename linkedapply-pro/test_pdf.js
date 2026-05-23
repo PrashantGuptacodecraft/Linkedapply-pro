@@ -10,8 +10,8 @@ async function test() {
       education: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10"
     };
 
-    const jobDesc = "We are hiring a Java Developer with Spring Boot experience.";
-    const role = "JAVA DEVELOPER";
+    const jobDesc = "We are hiring a Web Developer with React and Node.js experience.";
+    const role = "WEB DEVELOPER";
 
     console.log("Generating PDF...");
     const result = await buildTailoredResumePDF(mockStructure, jobDesc, "test_java_dev", role);

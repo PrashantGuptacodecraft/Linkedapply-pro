@@ -661,7 +661,57 @@ async function collectVisiblePosts() {
       const authorName = pickAuthorName(el);
       const postedTime = pickPostedTime(el);
       const profileUrl = pickHref(el, profileSelectors);
-      const postUrl = pickHref(el, postUrlSelectors);
+      let postUrl = "";
+
+      // 1. Try to find a link that is explicitly a post URL
+      const allLinks = Array.from(el.querySelectorAll("a"));
+      for (const a of allLinks) {
+        const href = a.href || "";
+        if (href.includes("/feed/update/urn:li:") || href.includes("/posts/") || href.includes("/update/urn:li:")) {
+          postUrl = href;
+          break;
+        }
+      }
+
+      // 2. Try to find URN attribute from the node or children
+      if (!postUrl) {
+        let postUrn = el.getAttribute("data-urn") || el.getAttribute("data-id") || el.getAttribute("data-chameleon-result-urn");
+        if (!postUrn) {
+          const urnEl = el.querySelector("[data-urn], [data-id], [data-chameleon-result-urn]");
+          if (urnEl) {
+            postUrn = urnEl.getAttribute("data-urn") || urnEl.getAttribute("data-id") || urnEl.getAttribute("data-chameleon-result-urn");
+          }
+        }
+
+        if (postUrn) {
+          const activityMatch = postUrn.match(/activity:(\d+)/);
+          const shareMatch = postUrn.match(/share:(\d+)/);
+          const directMatch = postUrn.match(/(\d{15,25})/);
+
+          if (activityMatch) {
+            postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityMatch[1]}`;
+          } else if (shareMatch) {
+            postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${shareMatch[1]}`;
+          } else if (postUrn.startsWith("urn:li:activity:")) {
+            postUrl = `https://www.linkedin.com/feed/update/${postUrn}`;
+          } else if (directMatch) {
+            postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${directMatch[1]}`;
+          }
+        }
+      }
+
+      // 3. Fallback: look for timestamp or subdescription links
+      if (!postUrl) {
+        const timeLink = el.querySelector("a.app-aware-link:has(time), .update-components-actor__sub-description-link, a[aria-label*='ago']");
+        if (timeLink && timeLink.href) {
+          postUrl = timeLink.href;
+        }
+      }
+
+      if (postUrl && postUrl.startsWith("/")) {
+        postUrl = "https://www.linkedin.com" + postUrl;
+      }
+
       const fullText = el.innerText || "";
       const emails = fullText.match(emailRegex) || [];
 

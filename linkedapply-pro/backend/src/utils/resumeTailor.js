@@ -65,6 +65,108 @@ function bulletPoint(doc, text, indent = 10) {
      .text(text, { continued: false });
 }
 
+function getRoleSpecificSections(targetRole) {
+  const normalized = (targetRole || "").toUpperCase().replace(/ \+ C2C$/i, "").trim();
+  
+  if (normalized === "BUSINESS ANALYST") {
+    return {
+      codingProfileTitle: "Analytical Profile",
+      codingProfile: [
+        "Solved analytical and SQL case studies on platforms like LeetCode and HackerRank.",
+        "Strong understanding of data queries, database schemas, and business process modeling.",
+        "Practicing data analysis and business requirement analysis for real-world scenarios."
+      ],
+      achievements: [
+        "AWS Certified Cloud Practitioner – Foundational Level.",
+        "Participated in Stellaris Hackathon and analyzed system requirements under time constraints.",
+        "Active learner in Business Analysis, CRM integration, and Agile methodologies."
+      ],
+      additional: [
+        "Interested in Business Analyst, Systems Analyst, and Product Analyst roles.",
+        "Comfortable working with Excel, SQL, Jira, Confluence, and CRM tools.",
+        "Continuously improving requirement gathering, BRD/FRD preparation, and process mapping."
+      ]
+    };
+  } else if (normalized === "DATA ANALYST" || normalized === "DATA ANALYTICS") {
+    return {
+      codingProfileTitle: "Data & SQL Profile",
+      codingProfile: [
+        "Solved 200+ data structures and SQL query challenges on LeetCode and HackerRank.",
+        "Strong understanding of data manipulation, statistical analysis, relational databases, and SQL optimizations.",
+        "Practicing Python-based data cleaning, exploratory data analysis (EDA), and data visualization."
+      ],
+      achievements: [
+        "AWS Certified Cloud Practitioner – Foundational Level.",
+        "Participated in Stellaris Hackathon and built data-driven solutions under time constraints.",
+        "Active learner in Data Analytics, data engineering, and visualization technologies."
+      ],
+      additional: [
+        "Interested in Data Analyst, Business Intelligence (BI) Analyst, and Python Developer roles.",
+        "Comfortable working with Python (Pandas, NumPy), SQL, Excel, and Power BI/Tableau.",
+        "Continuously improving data modeling, statistical analysis, and dashboard design."
+      ]
+    };
+  } else if (normalized === "FRONTEND DEVELOPER") {
+    return {
+      codingProfileTitle: "Coding Profile",
+      codingProfile: [
+        "Solved 200+ coding problems on LeetCode and frontend challenges on Frontend Mentor.",
+        "Strong understanding of data structures, JavaScript algorithms, DOM manipulation, and browser performance.",
+        "Practicing React-based problem solving and UI/UX design implementation."
+      ],
+      achievements: [
+        "AWS Certified Cloud Practitioner – Foundational Level.",
+        "Participated in Stellaris Hackathon and developed responsive frontend layouts under time constraints.",
+        "Active learner in modern frontend frameworks, state management, and UI styling."
+      ],
+      additional: [
+        "Interested in Frontend Developer, UI Developer, and React Developer roles.",
+        "Comfortable working with GitHub, REST APIs, responsive design, and CSS frameworks.",
+        "Continuously improving JavaScript, React.js, Tailwind CSS, and web performance optimization."
+      ]
+    };
+  } else if (normalized === "WEB DEVELOPER") {
+    return {
+      codingProfileTitle: "Coding Profile",
+      codingProfile: [
+        "Solved 300+ coding problems on LeetCode and HackerRank.",
+        "Strong understanding of arrays, strings, databases, and full stack web architecture.",
+        "Practicing JavaScript/Node.js-based web application development."
+      ],
+      achievements: [
+        "AWS Certified Cloud Practitioner – Foundational Level.",
+        "Participated in Stellaris Hackathon and developed a full stack project under time constraints.",
+        "Active learner in web technologies, RESTful APIs, and database management."
+      ],
+      additional: [
+        "Interested in Web Developer, Full Stack Developer, and Frontend Developer roles.",
+        "Comfortable working with GitHub, REST APIs, databases, and web application development.",
+        "Continuously improving HTML, CSS, JavaScript, React.js, Node.js, and Express."
+      ]
+    };
+  } else {
+    // Default: JAVA DEVELOPER
+    return {
+      codingProfileTitle: "Coding Profile",
+      codingProfile: [
+        "Solved 400+ coding problems on LeetCode.",
+        "Strong understanding of arrays, strings, recursion, sorting, searching, linked lists, stacks, queues, trees, and graphs.",
+        "Practicing Java-based problem solving for interviews and competitive programming."
+      ],
+      achievements: [
+        "AWS Certified Cloud Practitioner – Foundational Level.",
+        "Participated in Stellaris Hackathon and developed a project under time constraints.",
+        "Active learner in Java development, backend APIs, and software engineering fundamentals."
+      ],
+      additional: [
+        "Interested in Java Developer, Backend Developer, and Full Stack Developer roles.",
+        "Comfortable working with GitHub, REST APIs, databases, and web application development.",
+        "Continuously improving Java, Spring Boot, DSA, DBMS, and system design basics."
+      ]
+    };
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 //  generateTailoredPDF
 //  Builds PDF matching the exact resume template layout.
@@ -213,31 +315,32 @@ function generateTailoredPDF(structure, tailored, outputPath) {
       });
 
       // ══════════════════════════════════════════════════════════
-      //  CODING PROFILE (Static)
+      //  CODING PROFILE (Dynamic — tailored based on target role)
       // ══════════════════════════════════════════════════════════
-      sectionTitle(doc, "Coding Profile");
+      const roleSections = getRoleSpecificSections(tailored.targetRole || "JAVA DEVELOPER");
+      sectionTitle(doc, roleSections.codingProfileTitle);
 
-      bulletPoint(doc, "Solved 400+ coding problems on LeetCode.");
-      bulletPoint(doc, "Strong understanding of arrays, strings, recursion, sorting, searching, linked lists, stacks, queues, trees, and graphs.");
-      bulletPoint(doc, "Practicing Java-based problem solving for interviews and competitive programming.");
+      roleSections.codingProfile.forEach(pt => {
+        bulletPoint(doc, pt);
+      });
 
       // ══════════════════════════════════════════════════════════
-      //  ACHIEVEMENTS (Static)
+      //  ACHIEVEMENTS (Dynamic — tailored based on target role)
       // ══════════════════════════════════════════════════════════
       sectionTitle(doc, "Achievements");
 
-      bulletPoint(doc, "AWS Certified Cloud Practitioner – Foundational Level.");
-      bulletPoint(doc, "Participated in Stellaris Hackathon and developed a project under time constraints.");
-      bulletPoint(doc, "Active learner in Java development, backend APIs, and software engineering fundamentals.");
+      roleSections.achievements.forEach(pt => {
+        bulletPoint(doc, pt);
+      });
 
       // ══════════════════════════════════════════════════════════
-      //  ADDITIONAL (Static)
+      //  ADDITIONAL (Dynamic — tailored based on target role)
       // ══════════════════════════════════════════════════════════
       sectionTitle(doc, "Additional");
 
-      bulletPoint(doc, "Interested in Java Developer, Backend Developer, and Full Stack Developer roles.");
-      bulletPoint(doc, "Comfortable working with GitHub, REST APIs, databases, and web application development.");
-      bulletPoint(doc, "Continuously improving Java, Spring Boot, DSA, DBMS, and system design basics.");
+      roleSections.additional.forEach(pt => {
+        bulletPoint(doc, pt);
+      });
 
       // ── Finalize ────────────────────────────────────────────
       doc.end();
@@ -266,6 +369,8 @@ async function buildTailoredResumePDF(resumeStructure, jobDescription, jobId, ta
   try {
     // 1. Ask AI to tailor skills + pick projects from bank for this role
     const tailored = await tailorResumeForJob(resumeStructure, jobDescription, targetRole);
+    // Pass targetRole along so generateTailoredPDF can customize sub-sections
+    tailored.targetRole = targetRole;
 
     // 2. Generate the PDF matching the template layout
     const safeName = (resumeStructure.name || "resume").replace(/[^a-zA-Z0-9]/g, "_");

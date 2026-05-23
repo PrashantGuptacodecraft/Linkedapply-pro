@@ -77,9 +77,22 @@ app.post("/api/preview-resume", async (req, res) => {
     // Strip " + C2C" suffix if present so project bank matches correctly
     const cleanRole = targetRole ? targetRole.replace(/ \+ C2C/i, "") : "JAVA DEVELOPER";
 
+    // Map the flat frontend profile to the expected resumeStructure format
+    const formattedProfile = {
+      name: profile.name,
+      email: profile.email,
+      phone: profile.phone,
+      linkedIn: profile.linkedin,
+      location: profile.location,
+      summary: "",
+      skills: profile.skills,
+      experience: [{ title: profile.title, company: "Various", description: profile.experience }],
+      education: [{ degree: profile.education, institution: "" }]
+    };
+
     // Call buildTailoredResumePDF to generate the PDF
     const result = await buildTailoredResumePDF(
-      profile, 
+      formattedProfile, 
       jobDescription || "Sample Job Description", 
       "preview", 
       cleanRole

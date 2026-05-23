@@ -71,9 +71,17 @@ router.post("/send-bulk", async (req, res) => {
 
 // POST /api/gmail/preview
 router.post("/preview", (req, res) => {
-  const { candidate, teamLeadName, teamLeadEmail, jobDescription } = req.body;
+  const { candidate, teamLeadName, teamLeadEmail, jobDescription, postUrl } = req.body;
   const { buildEmailBody } = require("./gmailService");
-  const body = buildEmailBody(candidate || {}, teamLeadName || "", teamLeadEmail || "", jobDescription || "");
+  const body = buildEmailBody(
+    candidate || {},
+    jobDescription || "",
+    postUrl || "",
+    teamLeadEmail || "",
+    null,
+    null,
+    []
+  );
   res.json({ preview: body });
 });
 

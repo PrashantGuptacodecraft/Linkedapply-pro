@@ -23,7 +23,7 @@ const KEYWORD_OPTIONS = [
     skillLabel: "Java Developer",
     profile: {
       candidateTitle: "Java Developer",
-      candidateSkills: "Java, Spring Boot, Spring MVC, Microservices, REST APIs, Hibernate, JPA, MySQL, AWS, Docker, Git, Maven, JUnit",
+      candidateSkills: "Java, OOPs, Spring Boot, Hibernate/JPA, REST APIs, MySQL, JDBC, Maven, Git, GitHub, Postman, DSA, HTML, CSS, JavaScript, React.js",
       totalExperience: "",
       candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
       salary: "As per company norms",
@@ -35,19 +35,7 @@ const KEYWORD_OPTIONS = [
     skillLabel: "Business Analyst",
     profile: {
       candidateTitle: "Aspiring Business Analyst",
-      candidateSkills: "SQL, Excel, Power BI, Tableau, Data Analysis, Requirements Gathering, Process Mapping, Stakeholder Communication, Python Basics",
-      totalExperience: "",
-      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
-      salary: "As per company norms",
-    },
-  },
-  {
-    value: "PROJECT MANAGER + C2C",
-    label: "Project Manager + C2C",
-    skillLabel: "Project Manager",
-    profile: {
-      candidateTitle: "Project Manager",
-      candidateSkills: "Agile, Scrum, Jira, Sprint Planning, Stakeholder Management, Risk Management, Team Leadership, SDLC, Budgeting",
+      candidateSkills: "Requirement Gathering, Business Analysis, BRD, FRD, User Stories, Use Cases, SQL, Excel, Power BI, CRM, Jira, Agile, Process Flow Diagrams, Stakeholder Communication, Gap Analysis",
       totalExperience: "",
       candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
       salary: "As per company norms",
@@ -59,7 +47,7 @@ const KEYWORD_OPTIONS = [
     skillLabel: "Data Analyst",
     profile: {
       candidateTitle: "Aspiring Data Analyst",
-      candidateSkills: "Python, SQL, Power BI, Tableau, Excel, Pandas, NumPy, Matplotlib, Seaborn, MySQL, Machine Learning Basics, Data Cleaning, EDA, Data Visualization",
+      candidateSkills: "Python, SQL, Excel, Power BI, Tableau, Pandas, NumPy, Matplotlib, Seaborn, Scikit-learn, Data Cleaning, EDA, Data Visualization, Statistics, Dashboarding",
       totalExperience: "",
       candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
       salary: "As per company norms",
@@ -71,7 +59,7 @@ const KEYWORD_OPTIONS = [
     skillLabel: "Frontend Developer",
     profile: {
       candidateTitle: "Frontend Developer",
-      candidateSkills: "React.js, JavaScript, TypeScript, HTML5, CSS3, Tailwind CSS, Bootstrap, Redux, Context API, REST APIs, Git, Figma Basics",
+      candidateSkills: "HTML5, CSS3, JavaScript, React.js, React Router, Context API, Redux Basics, Bootstrap, Tailwind CSS, Responsive Design, Git, GitHub, Vite, REST API Integration, UI/UX Basics, Figma Basics",
       totalExperience: "",
       candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
       salary: "As per company norms",
@@ -83,7 +71,7 @@ const KEYWORD_OPTIONS = [
     skillLabel: "Web Developer",
     profile: {
       candidateTitle: "Web Developer",
-      candidateSkills: "HTML, CSS, JavaScript, React.js, Node.js, Express.js, MongoDB, SQL, REST APIs, Git, Responsive Design",
+      candidateSkills: "HTML5, CSS3, JavaScript, React.js, Node.js, Express.js, REST APIs, MongoDB, MySQL, Bootstrap, Tailwind CSS, Git, GitHub, Postman, Responsive Web Design, Basic Authentication, Deployment Basics",
       totalExperience: "",
       candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
       salary: "As per company norms",
@@ -240,6 +228,22 @@ export default function App() {
   };
 
   const handlePreviewResume = async () => {
+    const candidate = {
+      name: config.candidateName,
+      email: config.candidateEmailContact,
+      phone: config.candidatePhone,
+      linkedin: config.candidateLinkedIn,
+      location: config.candidateLocation,
+      relocate: config.openToRelocate,
+      workAuth: config.workAuthorization,
+      availability: config.candidateAvailability,
+      title: config.candidateTitle,
+      skills: config.candidateSkills,
+      experience: config.totalExperience,
+      education: config.candidateEducation,
+      salary: config.salary
+    };
+
     addLog(`📄 Generating Preview PDF for ${config.selectedKeyword}...`, "info");
     try {
       const res = await api.previewResume(candidate, config.selectedKeyword);

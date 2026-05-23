@@ -92,10 +92,10 @@ async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, 
 // ── Bulk Send to Multiple Recruiters ─────────────────────────
 async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, resumeRawText, ccEmails, bccEmails, skillLabel, teamLeadName, teamLeadEmail, useTailoring }) {
   const results = [];
-  let tailoringEnabled = useTailoring && !!process.env.GROQ_API_KEY;
+  let tailoringEnabled = useTailoring;
 
   if (useTailoring && !process.env.GROQ_API_KEY) {
-    logger.warn("[Groq] AI tailoring requested but GROQ_API_KEY is not set — sending with default content.");
+    logger.warn("[Groq] AI tailoring requested but GROQ_API_KEY is not set — falling back to offline/hardcoded generation if available.");
   }
 
   // ── Extract resume structure ONCE per batch (AI call, expensive) ─
@@ -118,6 +118,22 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
     } else {
       logger.warn("[ResumeTailor] Structure extraction failed — will use original resume PDF.");
     }
+  }
+
+  // Fallback to candidate profile if resume structure is empty (e.g. auto-loaded without raw text)
+  if (!resumeStructure && tailoringEnabled) {
+    resumeStructure = {
+      name: candidate.name,
+      email: candidate.email,
+      phone: candidate.phone,
+      linkedIn: candidate.linkedIn || candidate.linkedin,
+      location: candidate.location,
+      summary: "",
+      skills: candidate.skills,
+      experience: [{ title: candidate.title, company: "Various", description: candidate.experience }],
+      education: [{ degree: candidate.education, institution: "" }]
+    };
+    logger.info("[ResumeTailor] Generated fallback resume structure from candidate profile.");
   }
 
   let jobCounter = 0;
@@ -216,10 +232,10 @@ function buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail, tailo
       ${candidate.salary ? `<tr><td style="padding-right:14px;font-weight:600;">Salary:</td><td>${candidate.salary}</td></tr>` : ""}
     </table>
 
-    <p style="font-size:14px;color:#1e293b;line-height:1.7;margin:20px 0 4px;">Regards</p>
+    ${postUrlHtml ? `<p style="font-size:14px;color:#1e293b;line-height:1.7;margin:16px 0 16px;">Job description  link as per linkedin post: ${postUrlHtml}</p>` : ""}
+    <p style="font-size:14px;color:#1e293b;line-height:1.7;margin:0 0 4px;">Regards</p>
     <p style="font-size:14px;color:#1e293b;margin:0;">${candidate.name || ""}</p>
     ${teamLeadEmail ? `<p style="font-size:14px;color:#1e293b;margin:4px 0 0;">${teamLeadEmail}</p>` : ""}
-    ${postUrlHtml ? `<p style="font-size:14px;color:#1e293b;margin:16px 0 0;">Job description  link as per linkedin post: ${postUrlHtml}</p>` : ""}
 
   </div>
 </body>
@@ -228,15 +244,15 @@ function buildEmailBody(candidate, jobDescription, postUrl, teamLeadEmail, tailo
 
 // ── Plain Text Fallback ────────────────────────────────────────
 function buildPlainTextFallback(candidate, jobDescription, postUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects) {
-  const postUrlText = postUrl ? `\nJob description  link as per linkedin post: ${postUrl}` : "";
+  const postUrlText = postUrl ? `Job description  link as per linkedin post: ${postUrl}\n\n` : "";
 
   return `Hi,
 Hope you are doing well,
 Kindly find attached resume and below details:
 ${candidate.name ? `Full Name:   ${candidate.name}\n` : ""}${candidate.email ? `Email Address :  ${candidate.email}\n` : ""}${candidate.phone ? `Phone:  ${candidate.phone}\n` : ""}${candidate.linkedIn ? `LinkedIn:    ${candidate.linkedIn}\n` : ""}${candidate.location ? `Current Location: ${candidate.location}\n` : ""}${candidate.openToRelocate ? `Open to Relocate: ${candidate.openToRelocate}\n` : ""}${candidate.workAuthorization ? `Work Authorization:  ${candidate.workAuthorization}\n` : ""}${candidate.availability ? `Availability: ${candidate.availability}\n` : ""}${candidate.totalExperience ? `Total Experience:  ${candidate.totalExperience}\n` : ""}${candidate.salary ? `Salary: ${candidate.salary}\n` : ""}
-Regards
+${postUrlText}Regards
 ${candidate.name || ""}
-${teamLeadEmail || ""}${postUrlText}`;
+${teamLeadEmail || ""}`;
 }
 
 module.exports = { loginGmail, sendApplicationEmail, sendBulkEmails, buildEmailBody, buildPlainTextFallback };

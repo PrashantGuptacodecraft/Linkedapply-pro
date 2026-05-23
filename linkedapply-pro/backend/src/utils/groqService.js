@@ -6,7 +6,7 @@
 
 const https = require("https");
 const logger = require("./logger");
-const { getProjectsForRole } = require("./projectBank");
+const { getProjectsForRole, getSkillsForRole } = require("./projectBank");
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -199,7 +199,9 @@ Return ONLY the JSON object, nothing else.`;
  */
 async function tailorResumeForJob(resumeStructure, jobDescription, targetRole) {
   const hasJobDesc  = jobDescription && jobDescription.trim().length > 20;
-  const skillsList  = (resumeStructure.skills || []).join(", ");
+  const skillsList  = Array.isArray(resumeStructure.skills) 
+    ? resumeStructure.skills.join(", ") 
+    : String(resumeStructure.skills || "");
   const role        = (targetRole || "Software Developer").replace(/ \+ C2C$/i, "").trim();
 
   const jobContext = hasJobDesc
@@ -222,18 +224,24 @@ async function tailorResumeForJob(resumeStructure, jobDescription, targetRole) {
   let careerObjective = resumeStructure.summary || "";
   let relevantSkills  = resumeStructure.skills  || [];
 
-  try {
-    const resp    = await callGroq([
-      { role: "system", content: "You are a precise resume tailoring assistant. Always respond with valid JSON only." },
-      { role: "user",   content: skillsPrompt },
-    ], 400);
-    const cleaned = resp.replace(/```json\n?/gi, "").replace(/```\n?/gi, "").trim();
-    const parsed  = JSON.parse(cleaned);
-    if (parsed.careerObjective)                                                    careerObjective = parsed.careerObjective;
-    if (Array.isArray(parsed.relevantSkills) && parsed.relevantSkills.length > 0) relevantSkills  = parsed.relevantSkills;
-    logger.info(`[Groq] Skills tailored for "${role}": ${relevantSkills.length} selected`);
-  } catch (err) {
-    logger.warn(`[Groq] Skills step failed: ${err.message} — using original skills`);
+  const hardcodedSkills = getSkillsForRole(role);
+  if (hardcodedSkills) {
+    relevantSkills = hardcodedSkills;
+    logger.info(`[Groq] Using exact hardcoded skills for "${role}"`);
+  } else {
+    try {
+      const resp    = await callGroq([
+        { role: "system", content: "You are a precise resume tailoring assistant. Always respond with valid JSON only." },
+        { role: "user",   content: skillsPrompt },
+      ], 400);
+      const cleaned = resp.replace(/```json\n?/gi, "").replace(/```\n?/gi, "").trim();
+      const parsed  = JSON.parse(cleaned);
+      if (parsed.careerObjective)                                                    careerObjective = parsed.careerObjective;
+      if (Array.isArray(parsed.relevantSkills) && parsed.relevantSkills.length > 0) relevantSkills  = parsed.relevantSkills;
+      logger.info(`[Groq] Skills tailored for "${role}": ${relevantSkills.length} selected`);
+    } catch (err) {
+      logger.warn(`[Groq] Skills step failed: ${err.message} — using original skills`);
+    }
   }
 
   // ── Step 2: Pick projects from curated bank (or AI-generate if no bank) ──

@@ -18,8 +18,10 @@ const gmailRouter = require("./gmail/gmailRouter");
 const app = express();
 const PORT = process.env.PORT || 5000;
 const uploadsDir = path.resolve(__dirname, "../../uploads");
+const tailoredDir = path.join(uploadsDir, "tailored");
 
 fs.mkdirSync(uploadsDir, { recursive: true });
+fs.mkdirSync(tailoredDir, { recursive: true });
 
 // ── Middleware ───────────────────────────────────────────────
 app.use(cors({ origin: "http://localhost:3000" }));
@@ -37,6 +39,7 @@ const { parseResume } = require("./utils/resumeParser");
 const { buildTailoredResumePDF } = require("./utils/resumeTailor");
 
 app.use("/api/downloads", express.static(uploadsDir));
+app.use("/api/downloads/tailored", express.static(tailoredDir));
 
 app.post("/api/upload-resume", upload.single("resume"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -151,11 +154,26 @@ app.get("/api/health", (req, res) => {
 });
 
 // ── Start Server ─────────────────────────────────────────────
-const server = app.listen(PORT, () => {
-  logger.info(`✅ LinkedApply Pro backend running on http://localhost:${PORT}`);
-});
+const preferredPort = parseInt(process.env.PORT, 10) || 5000;
+const tryListen = (port) => {
+  const server = app.listen(port, () => {
+    logger.info(`✅ LinkedApply Pro backend running on http://localhost:${port}`);
+  });
 
-// Allow long-running scraping + bulk email sends
-server.setTimeout(60 * 60 * 1000); // 60 minutes
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      const nextPort = port + 1;
+      logger.warn(`Port ${port} is already in use. Trying port ${nextPort}...`);
+      tryListen(nextPort);
+    } else {
+      logger.error(`Server failed to start: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+  server.setTimeout(60 * 60 * 1000); // 60 minutes
+};
+
+tryListen(preferredPort);
 
 module.exports = app;

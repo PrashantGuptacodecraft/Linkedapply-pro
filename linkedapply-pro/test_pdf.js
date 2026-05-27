@@ -7,7 +7,7 @@ async function test() {
       email: "adityagupta983869@gmail.com",
       phone: "+91-9838693305",
       linkedIn: "https://www.linkedin.com/in/prashant-gupta-923885328/",
-      education: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10"
+      education: "B.Tech CSE – KIET Group of Institutions (2024–2028)"
     };
 
     const jobDesc = "We are hiring a Web Developer with React and Node.js experience.";

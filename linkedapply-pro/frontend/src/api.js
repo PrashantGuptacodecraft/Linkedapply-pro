@@ -17,6 +17,9 @@ export const linkedinSearch = (keywords, hoursBack, location, workAuth) =>
 export const linkedinLogout = () =>
   axios.post(`${BASE}/linkedin/logout`);
 
+export const linkedinAutoApply = (userData, jobKeywords, location, allowedTitles) =>
+  axios.post(`${BASE}/linkedin/auto-apply`, { userData, jobKeywords, location, allowedTitles }, { timeout: 60 * 60 * 1000 });
+
 // ── Gmail ────────────────────────────────────────────────────
 export const gmailLogin = (gmailUser, gmailAppPassword) =>
   axios.post(`${BASE}/gmail/login`, { gmailUser, gmailAppPassword });

@@ -33,7 +33,7 @@ const KEYWORD_OPTIONS = [
       candidateTitle: "Java Developer",
       candidateSkills: "Java, OOPs, Spring Boot, Hibernate/JPA, REST APIs, MySQL, JDBC, Maven, Git, GitHub, Postman, DSA, HTML, CSS, JavaScript, React.js",
       totalExperience: "2 years",
-      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
+      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028)",
       salary: "As per company norms",
     },
   },
@@ -45,7 +45,7 @@ const KEYWORD_OPTIONS = [
       candidateTitle: "Aspiring Business Analyst",
       candidateSkills: "Requirement Gathering, Business Analysis, BRD, FRD, User Stories, Use Cases, SQL, Excel, Power BI, CRM, Jira, Agile, Process Flow Diagrams, Stakeholder Communication, Gap Analysis",
       totalExperience: "2 years",
-      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
+      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028)",
       salary: "As per company norms",
     },
   },
@@ -57,7 +57,7 @@ const KEYWORD_OPTIONS = [
       candidateTitle: "Aspiring Data Analyst",
       candidateSkills: "Python, SQL, Excel, Power BI, Tableau, Pandas, NumPy, Matplotlib, Seaborn, Scikit-learn, Data Cleaning, EDA, Data Visualization, Statistics, Dashboarding",
       totalExperience: "2 years",
-      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
+      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028)",
       salary: "As per company norms",
     },
   },
@@ -69,7 +69,7 @@ const KEYWORD_OPTIONS = [
       candidateTitle: "Frontend Developer",
       candidateSkills: "HTML5, CSS3, JavaScript, React.js, React Router, Context API, Redux Basics, Bootstrap, Tailwind CSS, Responsive Design, Git, GitHub, Vite, REST API Integration, UI/UX Basics, Figma Basics",
       totalExperience: "2 years",
-      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
+      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028)",
       salary: "As per company norms",
     },
   },
@@ -81,7 +81,7 @@ const KEYWORD_OPTIONS = [
       candidateTitle: "Web Developer",
       candidateSkills: "HTML5, CSS3, JavaScript, React.js, Node.js, Express.js, REST APIs, MongoDB, MySQL, Bootstrap, Tailwind CSS, Git, GitHub, Postman, Responsive Web Design, Basic Authentication, Deployment Basics",
       totalExperience: "2 years",
-      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028) | SGPA: 8.0/10",
+      candidateEducation: "B.Tech CSE – KIET Group of Institutions (2024–2028)",
       salary: "As per company norms",
     },
   },
@@ -156,14 +156,7 @@ export default function App() {
           setResumeName(res.data.filename);
           setResumeAutoLoaded(true);
           addLog(`📂 Auto-detected existing resume: ${res.data.filename}`, "info");
-          // Also parse it with AI to auto-fill profile
-          setResumeParsing(true);
-          try {
-            const { parseResumeByPath } = await import("./api").then(m => ({ parseResumeByPath: m.parseResumeByPath })).catch(() => ({ parseResumeByPath: null }));
-            // Fallback: just set path, don't re-parse (file already on disk)
-            addLog("✨ Resume ready. Profile fields are pre-filled — upload a new resume to re-parse.", "success");
-          } catch {}
-          setResumeParsing(false);
+          addLog("✨ Resume ready. Upload a new resume to re-parse and auto-fill profile fields.", "success");
         }
       } catch { /* backend not ready yet, ignore */ }
     })();
@@ -262,7 +255,9 @@ export default function App() {
   };
 
   const generateSubject = () => {
-    return `Submission “SkillSet:${selectedKw.skillLabel}” Local to “${config.candidateLocation}”`;
+    const isGenericWorkAuth = !config.workAuthorization || config.workAuthorization.toLowerCase() === "yes" || config.workAuthorization.toLowerCase() === "no";
+    const loc = !isGenericWorkAuth ? config.workAuthorization : config.candidateLocation;
+    return `Submission “SkillSet:${selectedKw.skillLabel}” Local to “${loc}”`;
   };
 
   const applyParsedProfile = (profile) => {
@@ -457,9 +452,9 @@ export default function App() {
 
     addLog(`🚀 Sending ${recruiters.length} submission emails...`, "info");
     if (useTailorResume && resumeRawText) {
-      addLog(`📄 AI will generate a job-specific tailored resume PDF for each email`, "info");
+      addLog(`📄 AI will generate a SINGLE master tailored resume PDF for the ${selectedKw.skillLabel} role and send it to all`, "info");
     } else {
-      addLog(`📄 Using original uploaded resume PDF (no AI tailoring)`, "info");
+      addLog(`📄 Using original uploaded resume PDF exactly as-is (no AI tailoring)`, "info");
     }
     try {
       const res = await api.sendBulkEmails({
@@ -493,6 +488,75 @@ export default function App() {
     } catch (err) { addLog(`❌ Send error: ${err.message}`, "error"); }
 
     await api.linkedinLogout();
+    setRunning(false); setActiveStep(-1);
+  };
+
+  const runPortalApplyAutomation = async () => {
+    if (!config.linkedinEmail || !config.linkedinPass) {
+      addLog("Fill in LinkedIn credentials first.", "error");
+      return;
+    }
+    
+    runStartTimeRef.current = new Date();
+    addedServerLogsRef.current.clear();
+    setRunning(true); setCompletedSteps([]); setProgress(0);
+
+    // Dynamically generate allowed titles based on the selected keyword
+    const baseKeyword = config.selectedKeyword.split('+')[0].trim();
+    const allowedTitles = [
+      baseKeyword,
+      "Software Engineer",
+      "Developer",
+      "Engineer",
+      "Programmer",
+      baseKeyword.replace("Developer", "Engineer"),
+      baseKeyword.replace("Engineer", "Developer")
+    ];
+
+    const keywords = [config.selectedKeyword.split('+')[0].trim()]; // e.g. "JAVA DEVELOPER"
+    
+    setActiveStep(0);
+    addLog("🔐 Launching browser (Playwright)...", "info");
+    try {
+      const res = await api.linkedinLogin(config.linkedinEmail, config.linkedinPass);
+      if (!res.data.success) { addLog(`❌ ${res.data.message}`, "error"); setRunning(false); return; }
+      addLog("✅ LinkedIn login successful!", "success");
+      setCompletedSteps((p) => [...p, 1]); setProgress(33);
+    } catch (err) { addLog(`❌ LinkedIn login error: ${err.message}`, "error"); setRunning(false); return; }
+
+    setActiveStep(1);
+    addLog(`🔍 Starting Portal Auto-Apply for Jobs matching: ${keywords.join(", ")}`, "info");
+    addLog(`⚠️ Ensure your resume is uploaded so it can be filled in external forms.`, "info");
+    try {
+      // We pass candidate object, keywords, location, and allowed titles
+      const candidateData = {
+        firstName: config.candidateName.split(' ')[0],
+        lastName: config.candidateName.split(' ').slice(1).join(' '),
+        email: config.candidateEmailContact,
+        phone: config.candidatePhone,
+        resumePath: resumePath
+      };
+      
+      const isGenericWorkAuth = !config.workAuthorization || config.workAuthorization.toLowerCase() === "yes" || config.workAuthorization.toLowerCase() === "no";
+      const targetLocation = !isGenericWorkAuth ? config.workAuthorization : config.candidateLocation;
+
+      const res = await api.linkedinAutoApply(
+        candidateData,
+        keywords,
+        targetLocation,
+        allowedTitles
+      );
+      
+      if (res.data.success) {
+        addLog(`✅ Portal auto-apply finished: ${res.data.message}`, "success");
+      } else {
+        addLog(`❌ Portal apply failed: ${res.data.message || res.data.error}`, "error");
+      }
+      setCompletedSteps((p) => [...p, 2]); setProgress(100);
+    } catch (err) {
+      addLog(`❌ Portal auto-apply error: ${err.message}`, "error");
+    }
+
     setRunning(false); setActiveStep(-1);
   };
 
@@ -859,7 +923,7 @@ export default function App() {
                         ✨ AI-Tailor Resume PDF
                       </div>
                       <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2 }}>
-                        AI generates a role-specific tailored PDF resume matching each application.
+                        AI generates ONE master tailored PDF for the target role and sends it to everyone.
                       </div>
                     </div>
                     {useTailorResume ? (
@@ -1007,8 +1071,11 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 12 }}>
           <button className="btn-sec" onClick={() => { setLogs([]); setProgress(0); setEmailsSent(0); setCompletedSteps([]); setActiveStep(0); setJobs([]); }} disabled={running}>Reset</button>
+          <button className="btn-sec" onClick={runPortalApplyAutomation} disabled={running} style={{ border: `1px solid ${COLORS.accent}`}}>
+            {running ? "Running..." : "Start Portal Apply Flow"}
+          </button>
           <button className="btn-primary" onClick={runAutomation} disabled={running}>
-            {running ? "Autopilot running..." : "Start Autopilot Autoloop"}
+            {running ? "Autopilot running..." : "Start Email Autoloop"}
           </button>
         </div>
       </div>

@@ -15,7 +15,7 @@ const fs   = require("fs");
 const path = require("path");
 const PDFDocument = require("pdfkit");
 const logger = require("./logger");
-const { extractResumeStructure, tailorResumeForJob } = require("./groqService");
+const { extractResumeStructure, tailorResumeForJob } = require("./geminiService");
 
 // Where we store generated tailored resumes
 const TAILORED_DIR = path.resolve(__dirname, "../../../uploads/tailored");
@@ -249,10 +249,7 @@ function generateTailoredPDF(structure, tailored, outputPath) {
          .fillColor(BLACK)
          .text("2024 – 2028", MARGIN_X, eduY, { width: CONTENT_W, align: "right" });
 
-      doc.font("Helvetica")
-         .fontSize(10)
-         .fillColor(BLACK)
-         .text("SGPA: 8.0 / 10", MARGIN_X, doc.y);
+
 
       // ══════════════════════════════════════════════════════════
       //  TECHNICAL SKILLS (Dynamic — filled per role by AI)

@@ -8,7 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 const logger = require("./logger");
-const { callGroq } = require("./groqService");
+const { callGemini } = require("./geminiService");
 
 /**
  * Extract raw text from a resume file (PDF or DOCX).
@@ -84,7 +84,7 @@ Extract these fields exactly. If a field is not found, use an empty string "":
 Return ONLY the JSON object, nothing else.`;
 
   try {
-    const response = await callGroq([
+    const response = await callGemini([
       {
         role: "system",
         content: "You are a precise resume parser. Always respond with valid JSON only, no markdown fences, no extra text.",

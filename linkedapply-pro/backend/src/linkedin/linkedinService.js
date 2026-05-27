@@ -8,6 +8,11 @@ const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
 const logger = require("../utils/logger");
+const {
+  waitForNetworkIdle,
+  waitForDOMStable,
+  adaptivePause,
+} = require("../utils/humanTiming");
 
 let browser = null;
 let page = null;
@@ -208,11 +213,12 @@ function generateKeywordVariations(keyword, location, workAuth = "") {
   const tagClean = tag.trim();
   
   const locSuffix = location ? ` ${location.trim()}` : "";
-  const authSuffix = workAuth ? ` ${workAuth.trim()}` : "";
+  const isGenericWorkAuth = !workAuth || workAuth.trim().toLowerCase() === "yes" || workAuth.trim().toLowerCase() === "no";
+  const authSuffix = !isGenericWorkAuth ? ` ${workAuth.trim()}` : "";
 
   // If Work Auth is specified (e.g. USA, H1B), use it as the primary search target 
   // to avoid getting local results when applying internationally.
-  const primarySuffix = workAuth ? authSuffix : locSuffix;
+  const primarySuffix = !isGenericWorkAuth ? authSuffix : locSuffix;
 
   const variations = new Set();
 
@@ -236,11 +242,7 @@ function generateKeywordVariations(keyword, location, workAuth = "") {
   variations.add((`${skillClean} remote`).trim());
   variations.add((`${skillClean} immediate joiner`).trim());
 
-  // Include location as a secondary fallback just in case
-  if (workAuth && location) {
-    variations.add((`${skillClean} hiring` + locSuffix).trim());
-    variations.add((keyword.trim() + locSuffix).trim());
-  }
+  // Secondary fallback for location removed to prioritize work authorization.
 
   // With Senior/Lead prefix
   const words = skillClean.split(/\s+/);
@@ -257,7 +259,10 @@ function buildSearchTerms(keywords, location, workAuth = "") {
   const explicit = keywords.split(/[\n|]+/).map((t) => t.trim()).filter(Boolean);
   if (explicit.length > 1) {
     const locSuffix = location ? ` ${location.trim()}` : "";
-    return [...new Set(explicit)].map(t => (t + locSuffix).trim()).slice(0, 5);
+    const isGenericWorkAuth = !workAuth || workAuth.trim().toLowerCase() === "yes" || workAuth.trim().toLowerCase() === "no";
+    const authSuffix = !isGenericWorkAuth ? ` ${workAuth.trim()}` : "";
+    const suffix = !isGenericWorkAuth ? authSuffix : locSuffix;
+    return [...new Set(explicit)].map(t => (t + suffix).trim()).slice(0, 5);
   }
   // Single keyword — auto-expand into variations
   return generateKeywordVariations(keywords, location, workAuth);
@@ -557,12 +562,20 @@ async function readLinkedInLoginError() {
 
 async function waitForSearchResultsPage() {
   await page.waitForLoadState("domcontentloaded").catch(() => {});
-  await page.waitForTimeout(2500);
 
+  // ✅ Smart: wait for network to go idle instead of fixed 2.5s sleep
+  // This ensures LinkedIn has finished fetching search result data
+  await waitForNetworkIdle(page, {
+    quietMs: 1500,
+    maxWaitMs: 12000,
+    label: "search results page",
+  });
+
+  // Then confirm DOM has actual content
   await page.waitForFunction(
     (selectors) => selectors.some((selector) => document.querySelector(selector)),
     SEARCH_READY_SELECTORS,
-    { timeout: 15000 }
+    { timeout: 10000 }
   ).catch(() => {});
 }
 
@@ -576,7 +589,14 @@ async function scrollSearchResults(maxScrolls = 5) {
       return document.body.scrollHeight;
     });
 
-    await page.waitForTimeout(1000);
+    // ✅ Smart: wait for new posts to lazy-load after scroll
+    // instead of a fixed 1s sleep — listen to DOM stability
+    await waitForDOMStable(page, SEARCH_RESULT_CONTAINER_SELECTORS, {
+      pollMs: 350,
+      stableChecks: 2,
+      maxWaitMs: 4000,
+      label: `search scroll ${i + 1}/${maxScrolls}`,
+    });
 
     if (currentHeight === lastHeight) {
       noChangeCount++;
@@ -586,6 +606,9 @@ async function scrollSearchResults(maxScrolls = 5) {
     }
 
     lastHeight = currentHeight;
+
+    // Generous human pause between scrolls for safer delivery output
+    await adaptivePause(page, 3000, 0.4, `between search scrolls`);
   }
 }
 
@@ -830,16 +853,23 @@ async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
     logger.info(`Searching LinkedIn: "${term}" (page ${pageIndex + 1}, start=${start})`);
 
     try {
+      // Add human-like pause before navigating to search (simulating typing/thinking)
+      await adaptivePause(page, 4000, 0.4, "pre-search typing pause");
+
       await page.goto(searchUrl, {
         waitUntil: "domcontentloaded",
         timeout: 45000,
         referer: "https://www.google.com/",
       });
+
+      // Add a generous pause after page load to let LinkedIn settle and appear more human-like (applies to filters & location)
+      await adaptivePause(page, 5000, 0.3, "post-search load settle pause");
     } catch (navErr) {
       logger.warn(`Navigation failed for "${term}" page ${pageIndex + 1}: ${navErr.message}`);
       break;
     }
 
+    // ✅ Smart: wait for network idle + DOM content before scraping
     await waitForSearchResultsPage();
 
     // Scroll more on first page; less on subsequent pages (they load fresh content)
@@ -898,8 +928,11 @@ async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
       break;
     }
 
-    // Small pause between pages to be polite
-    await page.waitForTimeout(1000 + Math.random() * 1000);
+    // ✅ Smart: between-page pause — network idle + human jitter
+    // Replaces the old fixed 1–2s sleep. LinkedIn has time to log the request.
+    await waitForNetworkIdle(page, { quietMs: 2000, maxWaitMs: 8000, label: "between search pages" });
+    // Increased pause significantly as per user request for best delivery output (no time limit)
+    await adaptivePause(page, 6000, 0.4, "human reading pause between pages");
   }
   return allPosts;
 }
@@ -907,17 +940,14 @@ async function searchPostsForTerm(term, hoursBack, targetCount = 500) {
 // ── Step 1: Login to LinkedIn ────────────────────────────────
 async function loginLinkedIn(email, password) {
   try {
-    // First check if we can reach LinkedIn
+    // Best-effort connectivity probe: LinkedIn can intermittently reset the
+    // initial HTTP check even when Playwright can still open the login page.
     try {
       const axios = require('axios');
       await axios.get('https://www.linkedin.com', { timeout: 10000 });
       logger.info("LinkedIn is reachable via HTTP");
     } catch (networkErr) {
-      logger.warn(`LinkedIn network check failed: ${networkErr.message}`);
-      return {
-        success: false,
-        message: "Cannot reach LinkedIn. Check your internet connection and try again."
-      };
+      logger.warn(`LinkedIn network check failed: ${networkErr.message} — continuing with Playwright login flow`);
     }
 
     if (!browser || page?.isClosed()) {
@@ -1084,9 +1114,11 @@ async function searchJobPosts(keywords, hoursBack = 24, location = "", workAuth 
           challengeDetected = true;
         } else {
           try {
-            // Add random delay to look human
-            await page.waitForTimeout(1000 + Math.random() * 2000);
-            
+            // ✅ Smart: conservative pacing before each profile visit
+            // More natural than a fixed 1–3s sleep, and avoids security challenge triggers
+            await waitForNetworkIdle(page, { quietMs: 800, maxWaitMs: 5000, label: "pre-profile visit" });
+            await adaptivePause(page, 2000, 0.35, "profile visit human pause");
+
             const profileEmail = await extractEmailFromProfile(post.profileUrl);
             if (profileEmail) {
               if (globalSeenEmails.has(profileEmail)) {
@@ -1187,4 +1219,7 @@ async function closeBrowser() {
   }
 }
 
-module.exports = { loginLinkedIn, searchJobPosts, closeBrowser };
+function getPage() { return page; }
+function getBrowser() { return browser; }
+
+module.exports = { loginLinkedIn, searchJobPosts, closeBrowser, getPage, getBrowser };

@@ -36,4 +36,22 @@ router.post("/logout", async (req, res) => {
   res.json({ success: true, message: "Browser closed" });
 });
 
+// POST /api/linkedin/auto-apply
+router.post("/auto-apply", async (req, res) => {
+  const { userData, jobKeywords, location, allowedTitles } = req.body;
+  if (!userData || !jobKeywords || !location || !allowedTitles) {
+    return res.status(400).json({ error: "Missing required fields for auto-apply" });
+  }
+
+  logger.info(`Starting portal auto-apply flow for keywords: ${jobKeywords.join(", ")}`);
+  try {
+    const { autoApplyJobs } = require("./jobSearchService");
+    const result = await autoApplyJobs(userData, jobKeywords, location, allowedTitles);
+    res.json(result);
+  } catch (error) {
+    logger.error(`Error in auto-apply: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;

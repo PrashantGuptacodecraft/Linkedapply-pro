@@ -1,41 +1,63 @@
 // ============================================================
-//  LinkedApply Pro — Groq AI Tailoring Service
-//  File: backend/src/utils/groqService.js
-//  Uses: Groq API (OpenAI-compatible) with Llama 3
+//  LinkedApply Pro — Gemini AI Tailoring Service
+//  File: backend/src/utils/geminiService.js
+//  Uses: Google Gemini API with Gemini 1.5 Flash
 // ============================================================
 
 const https = require("https");
 const logger = require("./logger");
 const { getProjectsForRole, getSkillsForRole } = require("./projectBank");
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
-const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama-3.1-8b-instant"; // Fast, cheap, very capable, replaces decommissioned llama3-8b-8192
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const MODEL = "gemini-1.5-flash";
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 /**
- * Call Groq API and return the assistant message text.
+ * Call Gemini API and return the assistant message text.
  */
-function callGroq(messages, maxTokens = 300) {
+function callGemini(messages, maxTokens = 300) {
   return new Promise((resolve, reject) => {
-    if (!GROQ_API_KEY) {
-      return reject(new Error("GROQ_API_KEY not set"));
+    if (!GEMINI_API_KEY) {
+      return reject(new Error("GEMINI_API_KEY not set"));
     }
 
-    const body = JSON.stringify({
-      model: MODEL,
-      messages,
-      max_tokens: maxTokens,
-      temperature: 0.4,
+    let systemInstruction = undefined;
+    const contents = [];
+
+    messages.forEach(m => {
+      if (m.role === "system") {
+        systemInstruction = {
+          role: "system",
+          parts: [{ text: m.content }]
+        };
+      } else {
+        contents.push({
+          role: m.role === "assistant" ? "model" : "user",
+          parts: [{ text: m.content }]
+        });
+      }
     });
 
-    const url = new URL(GROQ_API_URL);
+    const payload = {
+      contents: contents,
+      generationConfig: {
+        maxOutputTokens: maxTokens * 4, // 4x multiplier to give Gemini Flash enough tokens
+        temperature: 0.4,
+      }
+    };
+    if (systemInstruction) {
+      payload.systemInstruction = systemInstruction;
+    }
+
+    const body = JSON.stringify(payload);
+    const url = new URL(GEMINI_API_URL);
+    
     const options = {
       hostname: url.hostname,
-      path: url.pathname,
+      path: url.pathname + url.search,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${GROQ_API_KEY}`,
         "Content-Length": Buffer.byteLength(body),
       },
     };
@@ -47,24 +69,25 @@ function callGroq(messages, maxTokens = 300) {
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) {
-            return reject(new Error(parsed.error.message || "Groq API error"));
+            return reject(new Error(parsed.error.message || "Gemini API error"));
           }
-          const text = parsed.choices?.[0]?.message?.content?.trim() || "";
+          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
           resolve(text);
         } catch (e) {
-          reject(new Error(`Groq parse error: ${e.message}`));
+          reject(new Error(`Gemini parse error: ${e.message}`));
         }
       });
     });
 
     req.on("error", reject);
     req.setTimeout(15000, () => {
-      req.destroy(new Error("Groq API request timed out"));
+      req.destroy(new Error("Gemini API request timed out"));
     });
     req.write(body);
     req.end();
   });
 }
+
 
 /**
  * Generate a tailored pitch for a specific job post.
@@ -119,7 +142,7 @@ Format your response EXACTLY as:
 Do NOT include any other text, labels, or explanations.`;
 
   try {
-    const response = await callGroq([
+    const response = await callGemini([
       { role: "system", content: "You are a concise job application assistant. Always respond in the exact format requested." },
       { role: "user", content: prompt },
     ], 300);
@@ -128,10 +151,10 @@ Do NOT include any other text, labels, or explanations.`;
     const tailoredPitch = parts[0]?.trim() || null;
     const tailoredSkills = parts[1]?.trim() || null;
 
-    logger.info(`[Groq] Tailored pitch generated for role "${targetRole || "unknown"}" (${tailoredPitch?.length || 0} chars)`);
+    logger.info(`[Gemini] Tailored pitch generated for role "${targetRole || "unknown"}" (${tailoredPitch?.length || 0} chars)`);
     return { tailoredPitch, tailoredSkills };
   } catch (err) {
-    logger.warn(`[Groq] Tailoring failed, using default content: ${err.message}`);
+    logger.warn(`[Gemini] Tailoring failed, using default content: ${err.message}`);
     return { tailoredPitch: null, tailoredSkills: null };
   }
 }
@@ -176,17 +199,17 @@ Return this JSON structure exactly (use empty string or empty array if not found
 Return ONLY the JSON object, nothing else.`;
 
   try {
-    const response = await callGroq([
+    const response = await callGemini([
       { role: "system", content: "You are a precise resume parser. Always respond with valid JSON only." },
       { role: "user", content: prompt },
     ], 1200);
 
     const cleaned = response.replace(/```json\n?/gi, "").replace(/```\n?/gi, "").trim();
     const parsed = JSON.parse(cleaned);
-    logger.info(`[Groq] Resume structure extracted: ${parsed.projects?.length || 0} projects, ${parsed.skills?.length || 0} skills`);
+    logger.info(`[Gemini] Resume structure extracted: ${parsed.projects?.length || 0} projects, ${parsed.skills?.length || 0} skills`);
     return { success: true, structure: parsed };
   } catch (err) {
-    logger.error(`[Groq] Resume structure extraction failed: ${err.message}`);
+    logger.error(`[Gemini] Resume structure extraction failed: ${err.message}`);
     return { success: false, structure: null };
   }
 }
@@ -227,10 +250,10 @@ async function tailorResumeForJob(resumeStructure, jobDescription, targetRole) {
   const hardcodedSkills = getSkillsForRole(role);
   if (hardcodedSkills) {
     relevantSkills = hardcodedSkills;
-    logger.info(`[Groq] Using exact hardcoded skills for "${role}"`);
+    logger.info(`[Gemini] Using exact hardcoded skills for "${role}"`);
   } else {
     try {
-      const resp    = await callGroq([
+      const resp    = await callGemini([
         { role: "system", content: "You are a precise resume tailoring assistant. Always respond with valid JSON only." },
         { role: "user",   content: skillsPrompt },
       ], 400);
@@ -238,9 +261,9 @@ async function tailorResumeForJob(resumeStructure, jobDescription, targetRole) {
       const parsed  = JSON.parse(cleaned);
       if (parsed.careerObjective)                                                    careerObjective = parsed.careerObjective;
       if (Array.isArray(parsed.relevantSkills) && parsed.relevantSkills.length > 0) relevantSkills  = parsed.relevantSkills;
-      logger.info(`[Groq] Skills tailored for "${role}": ${relevantSkills.length} selected`);
+      logger.info(`[Gemini] Skills tailored for "${role}": ${relevantSkills.length} selected`);
     } catch (err) {
-      logger.warn(`[Groq] Skills step failed: ${err.message} — using original skills`);
+      logger.warn(`[Gemini] Skills step failed: ${err.message} — using original skills`);
     }
   }
 
@@ -250,15 +273,15 @@ async function tailorResumeForJob(resumeStructure, jobDescription, targetRole) {
 
   if (bankProjects.length > 0) {
     // Role has a curated bank — AI picks best 3 based on job description
-    logger.info(`[Groq] Bank found for "${role}" (${bankProjects.length} projects) — AI selecting best 3...`);
+    logger.info(`[Gemini] Bank found for "${role}" (${bankProjects.length} projects) — AI selecting best 3...`);
     finalProjects = await selectProjectsFromBank(bankProjects, role, jobDescription, 3);
   } else {
     // No bank for this role — fall back to AI generation
-    logger.info(`[Groq] No bank for "${role}" — generating 3 AI projects...`);
+    logger.info(`[Gemini] No bank for "${role}" — generating 3 AI projects...`);
     finalProjects = await generateProjectsForRole(role, resumeStructure.name || "Candidate", relevantSkills, 3);
   }
 
-  logger.info(`[Groq] Done — ${finalProjects.length} projects, ${relevantSkills.length} skills for "${role}"`);
+  logger.info(`[Gemini] Done — ${finalProjects.length} projects, ${relevantSkills.length} skills for "${role}"`);
   return {
     careerObjective,
     relevantSkills,
@@ -299,7 +322,7 @@ Return ONLY a valid JSON array of ${count} indexes (0-based), ordered by relevan
 Return ONLY the JSON array, nothing else.`;
 
   try {
-    const resp    = await callGroq([
+    const resp    = await callGemini([
       { role: "system", content: "You are a precise resume tailoring assistant. Always respond with a JSON array only." },
       { role: "user",   content: prompt },
     ], 80);
@@ -308,12 +331,12 @@ Return ONLY the JSON array, nothing else.`;
     if (Array.isArray(indexes) && indexes.length > 0) {
       const picked = indexes.slice(0, count).map(i => bankProjects[i]).filter(Boolean);
       if (picked.length === count) {
-        logger.info(`[Groq] AI picked bank projects: indexes [${indexes.slice(0, count).join(", ")}]`);
+        logger.info(`[Gemini] AI picked bank projects: indexes [${indexes.slice(0, count).join(", ")}]`);
         return picked.map(p => ({ ...p, aiGenerated: false }));
       }
     }
   } catch (err) {
-    logger.warn(`[Groq] Bank selection failed: ${err.message} — returning all bank projects`);
+    logger.warn(`[Gemini] Bank selection failed: ${err.message} — returning all bank projects`);
   }
 
   // Fallback: return first `count` from bank
@@ -371,7 +394,7 @@ ${exampleItems}
 ]`;
 
   try {
-    const response = await callGroq([
+    const response = await callGemini([
       { role: "system", content: "You are a professional resume writer. Always respond with valid JSON only." },
       { role: "user", content: prompt },
     ], count * 220);
@@ -385,9 +408,9 @@ ${exampleItems}
     }
     return [];
   } catch (err) {
-    logger.error(`[Groq] Project generation failed for "${targetRole}": ${err.message}`);
+    logger.error(`[Gemini] Project generation failed for "${targetRole}": ${err.message}`);
     return [];
   }
 }
 
-module.exports = { tailorForJob, callGroq, extractResumeStructure, tailorResumeForJob, generateProjectsForRole };
+module.exports = { tailorForJob, callGemini, extractResumeStructure, tailorResumeForJob, generateProjectsForRole };

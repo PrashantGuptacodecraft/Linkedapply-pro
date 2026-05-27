@@ -8,7 +8,7 @@ const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
 const logger = require("../utils/logger");
-const { tailorForJob } = require("../utils/groqService");
+const { tailorForJob } = require("../utils/geminiService");
 const { buildTailoredResumePDF, extractStructureFromRawText } = require("../utils/resumeTailor");
 
 let transporter = null;
@@ -42,7 +42,9 @@ async function sendApplicationEmail({ fromEmail, recruiterEmail, recruiterName, 
     }
 
     const emailBody = buildEmailBody(candidate, jobDescription, postUrl, recruiterProfileUrl, teamLeadEmail, tailoredPitch, tailoredSkills, tailoredProjects);
-    const location = candidate.location || "Location";
+    const workAuth = (candidate.workAuthorization || "").trim();
+    const isGenericWorkAuth = workAuth.toLowerCase() === "yes" || workAuth.toLowerCase() === "no" || workAuth === "";
+    const location = !isGenericWorkAuth ? workAuth : (candidate.location || "Location");
     const skill = skillLabel || jobTitle || "Candidate";
     const subject = `Submission "${skill}" Local to "${location}"`;
 
@@ -96,8 +98,8 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
   let tailoringEnabled = useTailoring;
   const resumeTailorEnabled = useTailorResume !== false;
 
-  if (useTailoring && !process.env.GROQ_API_KEY) {
-    logger.warn("[Groq] AI tailoring requested but GROQ_API_KEY is not set — falling back to offline/hardcoded generation if available.");
+  if (useTailoring && !process.env.GEMINI_API_KEY) {
+    logger.warn("[Gemini] AI tailoring requested but GEMINI_API_KEY is not set — falling back to offline generation.");
   }
 
   // ── Extract resume structure ONCE per batch (AI call, expensive) ─
@@ -146,7 +148,7 @@ async function sendBulkEmails({ fromEmail, recruiters, candidate, resumePath, re
   let masterIsTailoredPdf = false;
 
   if (tailoringEnabled) {
-    logger.info(`[Groq] Generating single master tailored pitch for role: ${skillLabel}...`);
+    logger.info(`[Gemini] Generating single master tailored pitch for role: ${skillLabel}...`);
     // Tailor strictly using the role/skill (domain filter) instead of a specific job description
     const tailored = await tailorForJob(candidate, "", skillLabel);
     masterTailoredPitch  = tailored.tailoredPitch;

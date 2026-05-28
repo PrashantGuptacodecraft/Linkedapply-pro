@@ -37,9 +37,23 @@ async function autofillPortalForm(portalPage, userData) {
     for (const sel of applyClickSelectors) {
       try {
         const btn = portalPage.locator(sel).first();
-        if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        const isVis = await btn.isVisible({ timeout: 2000 }).catch(() => false);
+        if (isVis) {
           logger.info(`[PortalApply] Clicking initial apply button: ${sel}`);
-          await btn.click();
+          // Use scroll + evaluate for reliability on slow connections
+          try {
+            await btn.scrollIntoViewIfNeeded();
+            await portalPage.waitForTimeout(100);
+          } catch (_) {}
+          
+          // Try direct click first
+          try {
+            await btn.click({ timeout: 1500 }).catch(() => {});
+          } catch (_) {
+            // Fallback to evaluate
+            await btn.evaluate((el) => el.click()).catch(() => {});
+          }
+          
           await portalPage.waitForTimeout(3500);
           break;
         }

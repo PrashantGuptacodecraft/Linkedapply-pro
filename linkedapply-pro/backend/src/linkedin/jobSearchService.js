@@ -59,6 +59,51 @@ function getGeoId(location) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper: Reliable element interaction with visibility checks
+// ─────────────────────────────────────────────────────────────────────────────
+async function waitForElementReady(page, selector, timeoutMs = 5000) {
+  try {
+    const element = page.locator(selector);
+    // Wait for element to be in DOM
+    await element.first().waitFor({ state: 'attached', timeout: timeoutMs });
+    // Wait for element to be visible
+    await element.first().waitFor({ state: 'visible', timeout: timeoutMs });
+    // Wait for element to be in viewport or clickable
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function clickReliably(page, selector, timeoutMs = 3000) {
+  try {
+    const element = page.locator(selector).first();
+    
+    // Method 1: Wait for ready and use evaluate click
+    const isReady = await waitForElementReady(page, selector, timeoutMs);
+    if (isReady) {
+      await element.evaluate((el) => {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      await page.waitForTimeout(200);
+      
+      // Try direct click first
+      try {
+        await element.click({ timeout: 1000 });
+        return true;
+      } catch (_) {
+        // Fallback: use evaluate
+        await element.evaluate((el) => el.click());
+        return true;
+      }
+    }
+  } catch (e) {
+    logger.debug(`[JobSearch] clickReliably failed: ${e.message}`);
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Wait for an element to appear AND be stable (not just attached to DOM)
 // Returns true if found, false if not found within timeout
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,13 +215,19 @@ async function dismissOverlays(page) {
   
   for (const sel of selectors) {
     try {
-      const els = await page.$$(sel);
+      const els = await page.locator(sel).all().catch(() => []);
       for (const el of els) {
-        if (await el.isVisible().catch(() => false)) {
-          logger.info(`[JobSearch] Closing overlay: ${sel}`);
-          await el.evaluate((b) => b.click());
-          await adaptivePause(page, 500, 0.2, "after overlay dismiss");
-        }
+        try {
+          const isVis = await el.isVisible({ timeout: 1000 }).catch(() => false);
+          if (isVis) {
+            logger.info(`[JobSearch] Closing overlay: ${sel}`);
+            // Use evaluate for more reliable clicks on modal elements
+            await el.evaluate((button) => button.click()).catch(() => {
+              // Fallback to keyboard if evaluate fails
+            });
+            await adaptivePause(page, 400, 0.2, "after overlay dismiss");
+          }
+        } catch (_) {}
       }
     } catch (_) {}
   }

@@ -278,10 +278,10 @@ async function waitForJobCards(page, minRequired = 1) {
     "li.scaffold-layout__list-item",
     "li a[href*='/jobs/view/']",
     "a[href*='/jobs/view/']",
-  ], { label: "job cards", timeoutMs: 25000, stabilizeMs: 0 });
+  ], { label: "job cards", timeoutMs: 12000, stabilizeMs: 0 });
 
   if (!appeared) {
-    logger.warn(`[Timing] ⚠️ No job cards appeared within 25s`);
+    logger.warn(`[Timing] ⚠️ No job cards appeared within 12s`);
     return 0;
   }
 
@@ -294,9 +294,9 @@ async function waitForJobCards(page, minRequired = 1) {
     "li a[href*='/jobs/view/']",
     "a[href*='/jobs/view/']",
   ], {
-    pollMs: 500,
-    stableChecks: 3,
-    maxWaitMs: 8000,
+    pollMs: 300,
+    stableChecks: 2,
+    maxWaitMs: 5000,
     minCount: minRequired,
     label: "job cards",
   });
@@ -324,8 +324,8 @@ async function waitForRightPaneUpdate(page, previousTitle = "") {
 
   // Wait for network to go quiet (LinkedIn fetches the new job details via XHR)
   await waitForNetworkIdle(page, {
-    quietMs: 1200,
-    maxWaitMs: 10000,
+    quietMs: 700,
+    maxWaitMs: 5000,
     label: "right pane XHR",
   });
 
@@ -342,11 +342,21 @@ async function waitForRightPaneUpdate(page, previousTitle = "") {
 
   const appeared = await waitForElementReady(page, titleSelectors, {
     label: "job title h1",
-    timeoutMs: 10000,
-    stabilizeMs: 400, // Wait for any CSS slide-in animation
+    timeoutMs: 5000,
+    stabilizeMs: 150, // Wait for any CSS slide-in animation
   });
 
-  if (appeared) return true;
+  if (appeared) {
+    // IN-DEPTH FIX: Even if title appeared, wait for the skeleton/ghost loaders to disappear.
+    // If they stay, the page is hung.
+    try {
+      await page.waitForSelector('.ghost-animate, .jobs-ghost-fadein, .artdeco-skeleton', { state: 'hidden', timeout: 5000 });
+    } catch (e) {
+      logger.warn(`[Timing] ⚠️ Skeleton loader never disappeared. Right pane is hung.`);
+      return false; 
+    }
+    return true;
+  }
 
   // LinkedIn sometimes opens the full job detail page instead of a right-pane update.
   // In that case, an apply CTA is still a valid signal that the card has loaded.
@@ -357,8 +367,8 @@ async function waitForRightPaneUpdate(page, previousTitle = "") {
     "a[href*='apply']",
   ], {
     label: "apply CTA fallback",
-    timeoutMs: 8000,
-    stabilizeMs: 300,
+    timeoutMs: 4000,
+    stabilizeMs: 100,
   });
 
   return applyFallback;

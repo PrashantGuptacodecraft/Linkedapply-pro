@@ -352,6 +352,11 @@ async function launchBrowser(forceVisible = false) {
     javaScriptEnabled: true,
   });
   page = await context.newPage();
+  await context.clearCookies().catch(() => {});
+  await page.evaluate(() => {
+    try { localStorage.clear(); } catch (_) {}
+    try { sessionStorage.clear(); } catch (_) {}
+  }).catch(() => {});
   page.setDefaultNavigationTimeout(45000);
   page.setDefaultTimeout(30000);
 

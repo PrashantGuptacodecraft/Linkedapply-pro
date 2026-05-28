@@ -15,11 +15,11 @@ async function autofillPortalForm(portalPage, userData) {
     logger.info(`[PortalApply] Starting autofill: ${url}`);
 
     // ── Wait for page to fully render ────────────────────────
-    await portalPage.waitForLoadState("domcontentloaded", { timeout: 20000 });
+    await portalPage.waitForLoadState("domcontentloaded", { timeout: 30000 });
     try {
-      await portalPage.waitForLoadState("networkidle", { timeout: 10000 });
+      await portalPage.waitForLoadState("networkidle", { timeout: 15000 });
     } catch (_) {}
-    await portalPage.waitForTimeout(3000); // Allow React/SPA rendering
+    await portalPage.waitForTimeout(4000); // Allow React/SPA rendering
 
     // ── Click any initial "Apply" / "Apply Now" buttons ──────
     const applyClickSelectors = [
@@ -37,45 +37,94 @@ async function autofillPortalForm(portalPage, userData) {
     for (const sel of applyClickSelectors) {
       try {
         const btn = portalPage.locator(sel).first();
-        if (await btn.isVisible({ timeout: 1000 })) {
+        if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
           logger.info(`[PortalApply] Clicking initial apply button: ${sel}`);
           await btn.click();
-          await portalPage.waitForTimeout(2500);
+          await portalPage.waitForTimeout(3500);
           break;
         }
-      } catch (_) {}
+      } catch (e) {
+        logger.debug(`[PortalApply] Failed to click ${sel}: ${e.message}`);
+      }
     }
 
-    // ── Helper: try to fill a field with multiple selectors ──
-    const tryFill = async (selectors, value) => {
+    // ── Helper: try to fill a field with retry logic ──
+    const tryFill = async (selectors, value, fieldName = "") => {
       if (!value) return false;
       for (const sel of selectors) {
         try {
           const el = portalPage.locator(sel).first();
-          if (await el.isVisible({ timeout: 800 })) {
+          const isVisible = await el.isVisible({ timeout: 1200 }).catch(() => false);
+          if (isVisible) {
+            // Clear before filling
+            await el.fill("").catch(() => {});
+            await portalPage.waitForTimeout(200);
             await el.fill(String(value));
-            logger.info(`[PortalApply] Filled: ${sel}`);
-            return true;
+            
+            // Verify fill succeeded
+            const filledValue = await el.inputValue().catch(() => "");
+            if (filledValue === String(value) || filledValue.includes(value)) {
+              logger.info(`[PortalApply] ✔ Filled ${fieldName || "field"}: ${sel}`);
+              return true;
+            } else {
+              // Fallback: use paste method
+              await el.triple_click().catch(() => {});
+              await portalPage.keyboard.press("Delete");
+              await el.type(String(value), { delay: 10 });
+              logger.info(`[PortalApply] ✔ Filled (paste method) ${fieldName || "field"}: ${sel}`);
+              return true;
+            }
           }
-        } catch (_) {}
+        } catch (e) {
+          logger.debug(`[PortalApply] tryFill failed ${fieldName || sel}: ${e.message}`);
+        }
       }
       return false;
     };
 
-    // ── Helper: select from a <select> dropdown ───────────────
-    const trySelect = async (selectors, value) => {
+    // ── Helper: select from dropdown (with retry) ───────────────
+    const trySelect = async (selectors, value, fieldName = "") => {
       if (!value) return false;
       for (const sel of selectors) {
         try {
           const el = portalPage.locator(sel).first();
-          if (await el.isVisible({ timeout: 800 })) {
+          const isVisible = await el.isVisible({ timeout: 1200 }).catch(() => false);
+          if (isVisible) {
+            // Try label first, then value, then click-based selection
             await el.selectOption({ label: value }).catch(() =>
-              el.selectOption({ value })
+              el.selectOption({ value }).catch(async () => {
+                // Fallback: click and find option
+                await el.click();
+                await portalPage.waitForTimeout(300);
+                const option = portalPage.locator(`option, [role="option"]`).locator(`:text-is("${value}")`).first();
+                await option.click().catch(() => {});
+              })
             );
-            logger.info(`[PortalApply] Selected: ${sel} = ${value}`);
+            logger.info(`[PortalApply] ✔ Selected ${fieldName || "field"}: ${value}`);
             return true;
           }
-        } catch (_) {}
+        } catch (e) {
+          logger.debug(`[PortalApply] trySelect failed ${fieldName || sel}: ${e.message}`);
+        }
+      }
+      return false;
+    };
+
+    // ── Helper: fill date fields (yyyy-mm-dd format) ──
+    const tryFillDate = async (selectors, value, fieldName = "") => {
+      if (!value) return false;
+      for (const sel of selectors) {
+        try {
+          const el = portalPage.locator(sel).first();
+          if (await el.isVisible({ timeout: 800 }).catch(() => false)) {
+            await el.click();
+            await el.fill(value);
+            logger.info(`[PortalApply] ✔ Set date ${fieldName}: ${value}`);
+            return true;
+          }
+        } catch (e) {
+          logger.debug(`[PortalApply] tryFillDate failed ${fieldName}: ${e.message}`);
+        }
       }
       return false;
     };
@@ -91,7 +140,8 @@ async function autofillPortalForm(portalPage, userData) {
         "[name='firstName']",
         "[id='firstName']",
       ],
-      userData.firstName || (userData.name || "").split(" ")[0]
+      userData.firstName || (userData.name || "").split(" ")[0],
+      "First Name"
     );
 
     // ── 2. Last Name ──────────────────────────────────────────
@@ -106,7 +156,8 @@ async function autofillPortalForm(portalPage, userData) {
         "[id='lastName']",
       ],
       userData.lastName ||
-        (userData.name || "").split(" ").slice(1).join(" ")
+        (userData.name || "").split(" ").slice(1).join(" "),
+      "Last Name"
     );
 
     // ── 3. Full Name (fallback if no first/last fields) ───────
@@ -116,7 +167,8 @@ async function autofillPortalForm(portalPage, userData) {
         "input[placeholder*='full name' i]",
         "input[autocomplete='name']",
       ],
-      userData.name || `${userData.firstName || ""} ${userData.lastName || ""}`.trim()
+      userData.name || `${userData.firstName || ""} ${userData.lastName || ""}`.trim(),
+      "Full Name"
     );
 
     // ── 4. Email ──────────────────────────────────────────────
@@ -129,7 +181,8 @@ async function autofillPortalForm(portalPage, userData) {
         "input[autocomplete='email']",
         "input[data-automation-id='email']",
       ],
-      userData.email || ""
+      userData.email || "",
+      "Email"
     );
 
     // ── 5. Phone ──────────────────────────────────────────────
@@ -142,7 +195,8 @@ async function autofillPortalForm(portalPage, userData) {
         "input[autocomplete='tel']",
         "input[data-automation-id='phone']",
       ],
-      userData.phone || ""
+      userData.phone || "",
+      "Phone"
     );
 
     // ── 6. LinkedIn URL ───────────────────────────────────────
@@ -153,7 +207,8 @@ async function autofillPortalForm(portalPage, userData) {
         "input[placeholder*='linkedin' i]",
         "input[data-automation-id='linkedinUrl']",
       ],
-      userData.linkedinUrl || ""
+      userData.linkedinUrl || "",
+      "LinkedIn URL"
     );
 
     // ── 7. Location / City ────────────────────────────────────
@@ -165,7 +220,8 @@ async function autofillPortalForm(portalPage, userData) {
         "input[name*='city' i]",
         "input[autocomplete='address-level2']",
       ],
-      userData.location || ""
+      userData.location || "",
+      "Location"
     );
 
     // ── 8. Resume Upload ──────────────────────────────────────
@@ -194,17 +250,33 @@ async function autofillPortalForm(portalPage, userData) {
         "input[type='file']",                           // generic fallback
         "[data-automation-id='file-upload-input-ref']", // Workday
       ];
+      
+      let resumeUploaded = false;
       for (const sel of fileInputSelectors) {
         try {
           const el = portalPage.locator(sel).first();
-          // Use isAttached (not isVisible) because file inputs are often hidden
+          // Use evaluate to check if element exists and can receive input
           if (await el.evaluate((e) => !!e).catch(() => false)) {
-            logger.info(`[PortalApply] Uploading resume via: ${sel}`);
+            logger.info(`[PortalApply] ⬆️ Uploading resume via: ${sel}`);
             await el.setInputFiles(resumePath);
-            await portalPage.waitForTimeout(2000);
+            
+            // Verify upload by checking if filename appears on page
+            await portalPage.waitForTimeout(2500);
+            const pageContent = await portalPage.content();
+            const filename = path.basename(resumePath);
+            if (pageContent.includes(filename) || pageContent.includes(".pdf")) {
+              logger.info(`[PortalApply] ✔ Resume uploaded successfully`);
+              resumeUploaded = true;
+            }
             break;
           }
-        } catch (_) {}
+        } catch (e) {
+          logger.debug(`[PortalApply] Resume upload failed for ${sel}: ${e.message}`);
+        }
+      }
+      
+      if (!resumeUploaded) {
+        logger.warn(`[PortalApply] Resume upload may have failed - continuing anyway`);
       }
     } else {
       logger.warn(`[PortalApply] No resume file found at: ${resumePath}`);
@@ -217,14 +289,79 @@ async function autofillPortalForm(portalPage, userData) {
           "select[name*='authorization' i]",
           "select[name*='visa' i]",
           "select[id*='authorization' i]",
+          "select[name*='work' i]",
         ],
-        userData.workAuth
+        userData.workAuth,
+        "Work Auth"
       );
     }
 
-    // ── 10. Scroll down to reveal more fields ─────────────────
-    await portalPage.evaluate(() => window.scrollBy(0, 600));
-    await portalPage.waitForTimeout(1000);
+    // ── 10. Years of Experience ──────────────────────────────
+    if (userData.yearsOfExperience) {
+      await trySelect(
+        [
+          "select[name*='experience' i]",
+          "select[name*='years' i]",
+          "select[id*='experience' i]",
+        ],
+        userData.yearsOfExperience,
+        "Years of Experience"
+      );
+    }
+
+    // ── 11. Scrolling to reveal additional fields ────────────
+    logger.info(`[PortalApply] 📜 Scrolling to reveal hidden form fields...`);
+    for (let i = 0; i < 6; i++) {
+      await portalPage.evaluate(() => window.scrollBy(0, 500));
+      await portalPage.waitForTimeout(600);
+    }
+
+    // ── 12. Additional Text Fields (company, skills, etc) ─────
+    await tryFill(
+      [
+        "input[name*='company' i]",
+        "input[id*='company' i]",
+        "input[placeholder*='company' i]",
+      ],
+      userData.company || "",
+      "Company"
+    );
+
+    await tryFill(
+      [
+        "input[name*='skills' i]",
+        "input[id*='skills' i]",
+        "textarea[name*='skills' i]",
+      ],
+      userData.skills || "",
+      "Skills"
+    );
+
+    await tryFill(
+      [
+        "textarea[name*='cover' i]",
+        "textarea[id*='cover' i]",
+        "textarea[placeholder*='cover' i]",
+      ],
+      userData.coverLetter || "",
+      "Cover Letter"
+    );
+
+    // ── 13. Text areas (summary, objective, etc) ─────────────
+    await tryFill(
+      [
+        "textarea[name*='summary' i]",
+        "textarea[id*='summary' i]",
+        "textarea[placeholder*='summary' i]",
+        "textarea[placeholder*='objective' i]",
+      ],
+      userData.summary || "",
+      "Summary"
+    );
+
+    // ── 14. Scroll to top to verify form ─────────────────────
+    await portalPage.evaluate(() => window.scrollTo(0, 0));
+    await portalPage.waitForTimeout(500);
 
     logger.info("[PortalApply] ✅ Autofill complete. Tab left open for review/submit.");
     return { success: true, message: "Form filled. Please review and submit." };

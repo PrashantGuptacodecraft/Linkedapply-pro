@@ -1,63 +1,43 @@
 // ============================================================
-//  LinkedApply Pro — Gemini AI Tailoring Service
+//  LinkedApply Pro — AI Tailoring Service
 //  File: backend/src/utils/geminiService.js
-//  Uses: Google Gemini API with Gemini 1.5 Flash
+//  Uses: GitHub Models API (gpt-4o)
 // ============================================================
 
 const https = require("https");
 const logger = require("./logger");
 const { getProjectsForRole, getSkillsForRole } = require("./projectBank");
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const MODEL = "gemini-1.5-flash";
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+const GITHUB_PAT = process.env.GITHUB_PAT || "";
+const MODEL = "gpt-4o";
+const GITHUB_API_URL = "https://models.inference.ai.azure.com/chat/completions";
 
 /**
- * Call Gemini API and return the assistant message text.
+ * Call GitHub Models API and return the assistant message text.
  */
 function callGemini(messages, maxTokens = 300) {
   return new Promise((resolve, reject) => {
-    if (!GEMINI_API_KEY) {
-      return reject(new Error("GEMINI_API_KEY not set"));
+    if (!GITHUB_PAT) {
+      return reject(new Error("GITHUB_PAT not set"));
     }
-
-    let systemInstruction = undefined;
-    const contents = [];
-
-    messages.forEach(m => {
-      if (m.role === "system") {
-        systemInstruction = {
-          role: "system",
-          parts: [{ text: m.content }]
-        };
-      } else {
-        contents.push({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content }]
-        });
-      }
-    });
 
     const payload = {
-      contents: contents,
-      generationConfig: {
-        maxOutputTokens: maxTokens * 4, // 4x multiplier to give Gemini Flash enough tokens
-        temperature: 0.4,
-      }
+      model: MODEL,
+      messages: messages,
+      max_tokens: maxTokens * 4,
+      temperature: 0.4
     };
-    if (systemInstruction) {
-      payload.systemInstruction = systemInstruction;
-    }
 
     const body = JSON.stringify(payload);
-    const url = new URL(GEMINI_API_URL);
+    const url = new URL(GITHUB_API_URL);
     
     const options = {
       hostname: url.hostname,
-      path: url.pathname + url.search,
+      path: url.pathname,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Authorization": `Bearer ${GITHUB_PAT}`,
         "Content-Length": Buffer.byteLength(body),
       },
     };
@@ -69,25 +49,24 @@ function callGemini(messages, maxTokens = 300) {
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) {
-            return reject(new Error(parsed.error.message || "Gemini API error"));
+            return reject(new Error(parsed.error.message || "GitHub API error"));
           }
-          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+          const text = parsed.choices?.[0]?.message?.content?.trim() || "";
           resolve(text);
         } catch (e) {
-          reject(new Error(`Gemini parse error: ${e.message}`));
+          reject(new Error(`GitHub API parse error: ${e.message}`));
         }
       });
     });
 
     req.on("error", reject);
     req.setTimeout(15000, () => {
-      req.destroy(new Error("Gemini API request timed out"));
+      req.destroy(new Error("GitHub API request timed out"));
     });
     req.write(body);
     req.end();
   });
 }
-
 
 /**
  * Generate a tailored pitch for a specific job post.

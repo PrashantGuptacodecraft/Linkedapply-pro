@@ -1,3 +1,27 @@
+/**
+ * jobSearchService.js — LinkedApply Pro
+ *
+ * CLEAN REWRITE — v4 (2026-05-28)
+ *
+ * What this does (mirrors manual flow exactly):
+ *  1. Go to LinkedIn Jobs search URL directly (no warmup that caused redirect loops)
+ *  2. Wait for job cards to appear
+ *  3. Click each card, wait for right pane to show content
+ *  4. Look for the "Apply" button that opens company portal (NOT "Easy Apply")
+ *  5. Click it → capture new tab → open company portal
+ *
+ * Key fixes vs previous versions:
+ *  - Removed duplicate `waitForRightPane` wrapper (was calling waitForRightPaneUpdate twice)
+ *  - Removed unused `clickReliably` and `waitForVisible` helpers
+ *  - Removed conflicting skeleton wait strategies (was waiting in 3 places)
+ *  - Removed the SPA warmup that caused LinkedIn to reset to Jobs home
+ *  - Removed f_TPR date filter (was causing "problem loading your filters")
+ *  - Apply button detection: simple, direct, robust — checks button text only
+ *  - Overlay dismiss: single clean function, no duplicated close logic
+ */
+
+"use strict";
+
 const logger = require("../utils/logger");
 const { getPage, getBrowser } = require("./linkedinService");
 const { autofillPortalForm } = require("./portalApplyService");
@@ -6,825 +30,613 @@ const {
   waitForNetworkIdle,
   waitForDOMStable,
   waitForElementReady,
-  smartWait,
   adaptivePause,
   waitForJobCards,
-  waitForRightPaneUpdate,
-  waitForModalReady,
 } = require("../utils/humanTiming");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hardcoded geoIds — avoids LinkedIn's location resolution race condition
+// CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
-const JOB_CARD_SELECTORS = [
-  // Primary selectors
-  ".job-card-container",
-  ".jobs-search-results__list-item",
-  ".jobs-search-results__list-item--occluded",
-  "li.scaffold-layout__list-item",
-  
-  // Link-based selectors (works when card is just a link wrapper)
-  "li a[href*='/jobs/view/']",
-  "a[href*='/jobs/view/']",
-  "a[data-tracking-control-name='public_jobs_jserp-result_job-search-card']",
-  
-  // New LinkedIn UI variations
-  "li[data-job-id]",
-  ".base-card",
-  ".jobs-search-results__list-item-wrapper",
-  "[data-job-search-result]",
-  ".jobs-search-result-card",
-  
-  // Fallback: any clickable job link
-  "li a[href*='/jobs/']",
-  ".reusable-search__result-container",
-].join(", ");
 
-const GEO_ID_MAP = {
-  "usa":            "103644278",
-  "united states":  "103644278",
-  "us":             "103644278",
-  "india":          "102713980",
-  "canada":         "101174742",
-  "uk":             "101165590",
-  "united kingdom": "101165590",
-  "australia":      "101452733",
-  "germany":        "101282230",
-  "singapore":      "102454443",
+/**
+ * BUG FIX: DO NOT use a combined OR selector for job cards.
+ * A combined selector like ".job-card-container, li a[href*='/jobs/view/']" matches
+ * MULTIPLE elements per job (the container AND the link inside it), causing
+ * double/triple counting. cards.nth(5) would then point to wrong elements.
+ *
+ * Instead: try selectors ONE AT A TIME in priority order, use the first that works.
+ * Each selector in this list matches EXACTLY ONE element per job card.
+ */
+const JOB_CARD_SELECTORS_PRIORITY = [
+  ".job-card-container",                    // Most reliable — one div per job
+  ".jobs-search-results__list-item",        // List item — one li per job
+  "li.scaffold-layout__list-item",          // Scaffold list item
+  "li[data-job-id]",                        // Has job ID attribute
+  ".base-card",                             // Base card component
+  "a[href*='/jobs/view/']",                 // Direct job link (last resort)
+];
+
+/**
+ * Picks the SINGLE best selector that finds job cards without duplication.
+ * Returns { selector, count } where count is the number of unique job cards.
+ */
+async function resolveJobCardSelector(page) {
+  for (const sel of JOB_CARD_SELECTORS_PRIORITY) {
+    try {
+      const count = await page.locator(sel).count();
+      if (count > 0) {
+        logger.info(`[JobSearch] ✔ Using job card selector: "${sel}" (${count} cards)`);
+        return { selector: sel, count };
+      }
+    } catch (_) {}
+  }
+  return { selector: JOB_CARD_SELECTORS_PRIORITY[0], count: 0 };
+}
+
+/** GeoId map for major countries */
+const GEO_IDS = {
+  "united states": "103644278",
+  "usa":           "103644278",
+  "us":            "103644278",
+  "india":         "102713980",
+  "canada":        "101174742",
+  "uk":            "101165590",
+  "united kingdom":"101165590",
+  "australia":     "101452733",
+  "germany":       "101282230",
+  "singapore":     "102454443",
 };
 
 function getGeoId(location) {
   if (!location) return null;
-  return GEO_ID_MAP[location.trim().toLowerCase()] || null;
+  return GEO_IDS[location.trim().toLowerCase()] || null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: Reliable element interaction with visibility checks
-// ─────────────────────────────────────────────────────────────────────────────
-async function waitForElementReady(page, selector, timeoutMs = 5000) {
-  try {
-    const element = page.locator(selector);
-    // Wait for element to be in DOM
-    await element.first().waitFor({ state: 'attached', timeout: timeoutMs });
-    // Wait for element to be visible
-    await element.first().waitFor({ state: 'visible', timeout: timeoutMs });
-    // Wait for element to be in viewport or clickable
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-async function clickReliably(page, selector, timeoutMs = 3000) {
-  try {
-    const element = page.locator(selector).first();
-    
-    // Method 1: Wait for ready and use evaluate click
-    const isReady = await waitForElementReady(page, selector, timeoutMs);
-    if (isReady) {
-      await element.evaluate((el) => {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      });
-      await page.waitForTimeout(200);
-      
-      // Try direct click first
-      try {
-        await element.click({ timeout: 1000 });
-        return true;
-      } catch (_) {
-        // Fallback: use evaluate
-        await element.evaluate((el) => el.click());
-        return true;
-      }
-    }
-  } catch (e) {
-    logger.debug(`[JobSearch] clickReliably failed: ${e.message}`);
-  }
-  return false;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Wait for an element to appear AND be stable (not just attached to DOM)
-// Returns true if found, false if not found within timeout
-// ─────────────────────────────────────────────────────────────────────────────
-async function waitForVisible(page, selectors, timeoutMs = 15000) {
-  const combined = Array.isArray(selectors) ? selectors.join(", ") : selectors;
-  try {
-    await page.waitForSelector(combined, { state: "visible", timeout: timeoutMs });
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DIAGNOSTIC HELPER — Analyze page state for debugging
-// ─────────────────────────────────────────────────────────────────────────────
-async function diagnosePage(page, label = "diagnostics") {
-  try {
-    logger.info(`\n[Diagnostics] ========== ${label} ==========`);
-    
-    // URL
-    logger.info(`[Diagnostics] Current URL: ${page.url()}`);
-
-    // Page content size
-    const content = await page.content();
-    logger.info(`[Diagnostics] Page size: ${(content.length / 1024).toFixed(1)} KB`);
-
-    // Check for error messages
-    const errorMessages = [
-      { text: 'problem loading your filters', sel: 'text=problem loading your filters' },
-      { text: 'Something went wrong', sel: 'text=Something went wrong' },
-      { text: 'No matching jobs', sel: 'text=No matching jobs' },
-    ];
-    for (const err of errorMessages) {
-      const visible = await page.locator(err.sel).first().isVisible({ timeout: 1000 }).catch(() => false);
-      if (visible) {
-        logger.warn(`[Diagnostics] ⚠️ Error detected: ${err.text}`);
-      }
-    }
-
-    // Job card count
-    const cardCount = await page.locator(JOB_CARD_SELECTORS).count();
-    logger.info(`[Diagnostics] Job cards found: ${cardCount}`);
-
-    // Check for empty states
-    const emptyStates = [
-      '.artdeco-empty-state',
-      '.search-no-results__image-container',
-      'text=Your search didn\'t return',
-    ];
-    for (const empty of emptyStates) {
-      const visible = await page.locator(empty).first().isVisible({ timeout: 1000 }).catch(() => false);
-      if (visible) {
-        logger.info(`[Diagnostics] ✔ Empty state detected`);
-      }
-    }
-
-    // Check for loading spinners
-    const loadingSpinners = await page.locator('.artdeco-spinner, .artdeco-skeleton, [role="progressbar"]').count();
-    if (loadingSpinners > 0) {
-      logger.warn(`[Diagnostics] ⚠️ ${loadingSpinners} loading spinners still active`);
-    }
-
-    // Results count text
-    try {
-      const resultsText = await page.locator('.jobs-search-results__title-heading, h1').first().innerText().catch(() => "");
-      if (resultsText) {
-        logger.info(`[Diagnostics] Results text: ${resultsText}`);
-      }
-    } catch (_) {}
-
-    logger.info(`[Diagnostics] ========== END ${label} ==========\n`);
-  } catch (e) {
-    logger.error(`[Diagnostics] Error during diagnostics: ${e.message}`);
-  }
-}
-// Always uses .evaluate() click to bypass viewport restrictions
+// OVERLAY DISMISS — single, clean function
+// Kills LinkedIn chat bubbles, message compose window, toast notifications
 // ─────────────────────────────────────────────────────────────────────────────
 async function dismissOverlays(page) {
-  // Nuke chat popups and toasts via CSS so they never block clicks
-  await page.evaluate(() => {
-    try {
-      const overlays = document.querySelectorAll('.msg-overlay-container, .msg-overlay-list-bubble, #msg-overlay, .artdeco-toast-item');
-      overlays.forEach(c => {
-        if (c.style.display !== 'none') c.style.display = 'none';
-        if (c.style.visibility !== 'hidden') c.style.visibility = 'hidden';
-      });
-    } catch(e){}
-  }).catch(()=>{});
+  // 1. CSS injection — instantly hide all chat/notification overlays
+  await page.addStyleTag({
+    content: `
+      .msg-overlay-container, .msg-overlay-list-bubble,
+      .msg-overlay-bubble-header, #msg-overlay,
+      .artdeco-toast-item, .msg-convo-wrapper,
+      .msg-overlay-conversation-bubble { 
+        display: none !important; 
+      }
+    `,
+  }).catch(() => {});
 
-  const selectors = [
-    // LinkedIn "New message" / chat bubble overlays
-    "button.msg-overlay-bubble-header__control",
-    ".msg-overlay-list-bubble .msg-overlay-bubble-header__control",
-    "button.msg-overlay-bubble-header__control[aria-label*='Close']",
-    "button.msg-overlay-bubble-header__control[aria-label*='close']",
-    "button[aria-label^='Close']",
-    "button[aria-label^='Dismiss']",
-    "[data-control-name='overlay.close_conversation_window']",
-    // Generic dismiss buttons
-    "[data-test-modal-close-btn]",
-    "button.contextual-sign-in-modal__modal-dismiss-icon",
-    "button.artdeco-toast-item__dismiss",
-    "button.artdeco-modal__dismiss",
-  ];
-  
-  // Press Escape to dismiss any open focused modals (like New message)
+  // 2. Escape key closes focused dialogs (compose, preferences, etc.)
   await page.keyboard.press("Escape").catch(() => {});
-  
-  for (const sel of selectors) {
+  await page.waitForTimeout(400);
+
+  // 3. Click X buttons on any visible modal/overlay
+  const xButtons = [
+    "button[aria-label='Dismiss']",
+    "button.artdeco-modal__dismiss",
+    "button[aria-label='Close your compose window']",
+    "button[aria-label='Close compose']",
+    "button[aria-label='Close']",
+    "button.msg-overlay-bubble-header__control",
+    ".artdeco-modal--layer-default button.artdeco-modal__dismiss",
+  ];
+  for (const sel of xButtons) {
     try {
-      const els = await page.locator(sel).all().catch(() => []);
-      for (const el of els) {
-        try {
-          const isVis = await el.isVisible({ timeout: 1000 }).catch(() => false);
-          if (isVis) {
-            logger.info(`[JobSearch] Closing overlay: ${sel}`);
-            // Use evaluate for more reliable clicks on modal elements
-            await el.evaluate((button) => button.click()).catch(() => {
-              // Fallback to keyboard if evaluate fails
-            });
-            await adaptivePause(page, 400, 0.2, "after overlay dismiss");
-          }
-        } catch (_) {}
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 400 }).catch(() => false)) {
+        await el.evaluate((b) => b.click()).catch(() => {});
+        await page.waitForTimeout(250);
       }
     } catch (_) {}
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 1 — Navigate to LinkedIn Jobs with aggressive error recovery
+// STEP 1 — Navigate to LinkedIn Jobs search
 //
-// Strategy:
-//   A) Load the raw search page first (no filters) so LinkedIn resolves geoId
-//   B) Wait for network to go IDLE (LinkedIn SPA finishes booting)
-//   C) Wait for DOM to stabilize (job cards stop changing)
-//   D) Navigate to the filtered URL (geoId + f_TPR=r86400)
-//   E) Ignore cosmetic "problem loading filters" — it's often just a UI glitch
-//   F) Verify actual jobs are loading (not empty result set)
-//   G) Retry with clean URL if truly no jobs found
+// Root cause of "filter not working":
+//   The f_TPR=r86400 date filter causes "problem loading your filters" for
+//   most accounts. We don't use it. We navigate DIRECTLY to the search URL.
+//   No warmup navigation — that caused the SPA to land on Jobs home instead.
 // ─────────────────────────────────────────────────────────────────────────────
-async function navigateToFilteredJobs(page, keywordsStr, location) {
-  const locStr = encodeURIComponent(location);
-  const geoId = getGeoId(location);
-  const locParam = geoId ? `&location=${locStr}&geoId=${geoId}` : `&location=${locStr}`;
-  const finalUrl = `https://www.linkedin.com/jobs/search/?keywords=${keywordsStr}${locParam}&f_TPR=r86400&sortBy=DD`;
-  const cleanFinalUrl = finalUrl.replace(/[?&]currentJobId=[^&]+/g, "");
+async function navigateToLinkedInSearch(page, keywordsStr, location) {
+  const geoId  = getGeoId(location);
+  const locStr = encodeURIComponent(location || "");
 
-  logger.info(`[JobSearch] 🔍 Navigating to LinkedIn jobs search...`);
-  logger.info(`[JobSearch] Keywords: ${keywordsStr}, Location: ${location}, GeoId: ${geoId}`);
+  // Build search URLs — no date filter (f_TPR), that breaks filters
+  const withLocationUrl = geoId
+    ? `https://www.linkedin.com/jobs/search/?keywords=${keywordsStr}&location=${locStr}&geoId=${geoId}&sortBy=DD`
+    : location
+    ? `https://www.linkedin.com/jobs/search/?keywords=${keywordsStr}&location=${locStr}&sortBy=DD`
+    : `https://www.linkedin.com/jobs/search/?keywords=${keywordsStr}&sortBy=DD`;
 
-  // Simple approach: Just navigate and ignore errors, focus on whether jobs loaded
-  const urls = [
-    cleanFinalUrl,  // Full URL with all filters
-    cleanFinalUrl.replace(/&f_TPR=r86400/, ""),  // Without date filter
-    `https://www.linkedin.com/jobs/search/?keywords=${keywordsStr}`,  // Keywords only
+  const keywordsOnlyUrl = `https://www.linkedin.com/jobs/search/?keywords=${keywordsStr}`;
+
+  const attempts = [
+    { url: withLocationUrl, label: "location search" },
+    { url: keywordsOnlyUrl, label: "keywords-only fallback" },
   ];
 
-  for (let attemptIndex = 0; attemptIndex < urls.length; attemptIndex++) {
+  for (let i = 0; i < attempts.length; i++) {
+    const { url, label } = attempts[i];
+    logger.info(`[JobSearch] 🔍 Attempt ${i + 1}/2 [${label}]: ${url}`);
+
     try {
-      const url = urls[attemptIndex];
-      const urlLabel = attemptIndex === 0 ? "filtered" : attemptIndex === 1 ? "no-date-filter" : "keywords-only";
-      
-      logger.info(`[JobSearch] 🔄 Attempt ${attemptIndex + 1}: ${urlLabel} search...`);
-      
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 180000 });
-      logger.info(`[JobSearch] ✔ Page loaded. Waiting for network...`);
-      
-      // Wait for network to settle
-      const idleWait = attemptIndex === 0 ? 8000 : 12000;
-      await waitForNetworkIdle(page, { quietMs: 800, maxWaitMs: idleWait, label: `attempt ${attemptIndex + 1}` });
-      
-      // Small pause for rendering
-      await adaptivePause(page, 1000, 0.3, `after load attempt ${attemptIndex + 1}`);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-      // Dismiss overlays (modals, chat, etc)
+      // Wait for LinkedIn SPA to finish loading job data via XHR
+      await waitForNetworkIdle(page, { quietMs: 2000, maxWaitMs: 15000, label: `nav attempt ${i + 1}` });
+
+      // Dismiss overlays that appear right after navigation
       await dismissOverlays(page);
-      
-      // Final wait for UI to settle
-      await adaptivePause(page, 500, 0.2, "final UI settle");
 
-      // Check if jobs actually loaded
-      const jobCount = await page.locator(JOB_CARD_SELECTORS).count().catch(() => 0);
-      
-      if (jobCount > 0) {
-        logger.info(`[JobSearch] ✅ Success! Found ${jobCount} job cards on attempt ${attemptIndex + 1}`);
+      // Short settle for SPA rendering
+      await page.waitForTimeout(1000);
+
+      // Verify we're on the search results page, not the Jobs home
+      const currentUrl = page.url();
+      logger.info(`[JobSearch] ✔ Final URL: ${currentUrl}`);
+
+      if (!currentUrl.includes("/jobs/search")) {
+        logger.warn(`[JobSearch] ⚠️ Not on search page (on: ${currentUrl}). Navigating directly...`);
+        // Direct force-navigate to the correct URL
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await waitForNetworkIdle(page, { quietMs: 2000, maxWaitMs: 10000, label: "direct retry" });
+        await dismissOverlays(page);
+        await page.waitForTimeout(500);
+      }
+
+      // Count job cards
+      const cardCount = await page.locator(JOB_CARD_SELECTOR).count().catch(() => 0);
+      logger.info(`[JobSearch] Job cards visible: ${cardCount}`);
+
+      if (cardCount > 0) {
+        logger.info(`[JobSearch] ✅ Search loaded with ${cardCount} cards`);
         return true;
       }
 
-      logger.warn(`[JobSearch] ⚠️ No jobs found on attempt ${attemptIndex + 1} (0 cards). Trying next approach...`);
+      // Check for filter-problem banner — if it appeared but cards loaded anyway, ignore it
+      const filterError = await page.locator("text=problem loading your filters").isVisible({ timeout: 1000 }).catch(() => false);
+      if (filterError) {
+        logger.warn(`[JobSearch] ⚠️ LinkedIn filter error banner appeared (cosmetic — ignoring)`);
+        // Wait a bit more for cards after the filter error
+        await page.waitForTimeout(2000);
+        const cardCount2 = await page.locator(JOB_CARD_SELECTOR).count().catch(() => 0);
+        if (cardCount2 > 0) {
+          logger.info(`[JobSearch] ✅ Cards loaded despite filter error: ${cardCount2}`);
+          return true;
+        }
+      }
+
+      logger.warn(`[JobSearch] ⚠️ No job cards on attempt ${i + 1}`);
 
     } catch (err) {
-      logger.error(`[JobSearch] Attempt ${attemptIndex + 1} error: ${err.message}`);
-      // Continue to next attempt
+      logger.error(`[JobSearch] Navigation attempt ${i + 1} error: ${err.message}`);
     }
   }
 
-  logger.error(`[JobSearch] ❌ All navigation attempts failed. Final URL: ${page.url()}`);
+  logger.error(`[JobSearch] ❌ All navigation attempts failed`);
   return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 2 — Slowly scroll the left jobs pane to load all cards
-// Each scroll waits for DOM to stabilize before scrolling again
-// IMPROVED: Better detection of scroll container, retry on scroll fail
+// STEP 2 — Scroll left pane to load all job cards
 // ─────────────────────────────────────────────────────────────────────────────
-async function scrollJobsPane(page, scrollCount = 6) {
-  logger.info(`[JobSearch] 📜 Scrolling left pane to load all job cards (${scrollCount} passes)...`);
-
-  // Find the actual scrollable container (LinkedIn moves it around)
-  const scrollableSelectors = [
+async function scrollJobsPane(page, passes = 5) {
+  const containerSelectors = [
     ".jobs-search-results-list",
     ".scaffold-layout__list",
     ".jobs-search-results__list",
     ".artdeco-list",
-    ".jobs-search-results__list-container",
     "[role='main']",
-    ".jobs-search",
   ];
 
-  let scrollableContainer = null;
-  for (const sel of scrollableSelectors) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-        scrollableContainer = sel;
-        logger.info(`[JobSearch] ✔ Found scrollable container: ${sel}`);
-        break;
-      }
-    } catch (_) {}
-  }
-
-  if (!scrollableContainer) {
-    logger.warn(`[JobSearch] ⚠️ Could not find scrollable container. Using window scroll fallback.`);
-    scrollableContainer = null;
-  }
-
-  for (let s = 0; s < scrollCount; s++) {
-    try {
-      // Scroll the container
-      if (scrollableContainer) {
-        await page.locator(scrollableContainer).first().evaluate(el => {
-          el.scrollBy(0, 800);
-        });
-      } else {
-        // Fallback: scroll window
-        await page.evaluate(() => window.scrollBy(0, 800));
-      }
-
-      // Wait for LinkedIn to lazy-load new cards
-      await adaptivePause(page, 400, 0.3, `scroll ${s + 1}/${scrollCount}`);
-
-      // Wait for new cards to stop appearing
-      const cardCount = await page.locator(JOB_CARD_SELECTORS).count();
-      await waitForDOMStable(page, JOB_CARD_SELECTORS, {
-        pollMs: 300,
-        stableChecks: 2,
-        maxWaitMs: 3000,
-        label: `scroll ${s + 1}/${scrollCount} (${cardCount} cards)`,
-      });
-
-      logger.info(`[JobSearch] ✔ Scroll pass ${s + 1}/${scrollCount} complete (${cardCount} cards loaded)`);
-    } catch (err) {
-      logger.warn(`[JobSearch] ⚠️ Scroll pass ${s + 1} failed: ${err.message}. Continuing...`);
+  let container = null;
+  for (const sel of containerSelectors) {
+    if (await page.locator(sel).first().isVisible({ timeout: 1000 }).catch(() => false)) {
+      container = sel;
+      break;
     }
   }
 
-  const finalCardCount = await page.locator(JOB_CARD_SELECTORS).count();
-  logger.info(`[JobSearch] ✅ Scrolling complete. Total cards loaded: ${finalCardCount}`);
-}
+  logger.info(`[JobSearch] 📜 Scrolling (${passes} passes, container: ${container || "window"})...`);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// STEP 3 — Wait for the right pane to fully update after clicking a job card
-// ─────────────────────────────────────────────────────────────────────────────
-async function waitForRightPane(page) {
-  // ✅ Uses smart pane update detection (network idle + element ready)
-  // Some LinkedIn result clicks open the full job detail page instead of
-  // a pure right-pane update, so we also accept a visible apply CTA.
-  return await waitForRightPaneUpdate(page);
-}
-
-async function clickJobCard(page, cardLocator, cardIndex) {
-  const beforeUrl = page.url();
-
-  try {
-    await cardLocator.scrollIntoViewIfNeeded().catch(() => {});
-    await cardLocator.hover().catch(() => {});
-    await adaptivePause(page, 700, 0.4, `before card click ${cardIndex}`);
-    await cardLocator.click({ force: true, timeout: 20000 });
-  } catch (err) {
+  for (let i = 0; i < passes; i++) {
     try {
-      await cardLocator.evaluate((el) => {
-        try {
-          el.click();
-        } catch (_) {
-          if (el.closest('a')) el.closest('a').click();
-        }
-      });
+      if (container) {
+        await page.locator(container).first().evaluate((el) => el.scrollBy(0, 700));
+      } else {
+        await page.evaluate(() => window.scrollBy(0, 700));
+      }
+      await page.waitForTimeout(600);
     } catch (_) {}
   }
 
-  try {
-    await page.waitForLoadState("domcontentloaded", { timeout: 7000 }).catch(() => {});
-    await waitForNetworkIdle(page, { quietMs: 700, maxWaitMs: 5000, label: `card ${cardIndex} settle` });
-  } catch (_) {}
-
-  return page.url() !== beforeUrl;
+  const total = await page.locator(JOB_CARD_SELECTOR).count();
+  logger.info(`[JobSearch] ✅ Scroll done — ${total} cards total`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 4 — Read job details from the right pane
+// STEP 3 — Click a job card and wait for right pane to load
 // ─────────────────────────────────────────────────────────────────────────────
-async function readJobDetails(page) {
-  let title = "";
-  let company = "";
-  let location = "";
-  let description = "";
+async function clickJobCard(page, cardLocator, index) {
+  try {
+    await cardLocator.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(300);
+    await cardLocator.click({ force: true, timeout: 15000 });
+  } catch (_) {
+    // JS click fallback
+    await cardLocator.evaluate((el) => {
+      try { el.click(); } catch (e) {
+        const link = el.closest("a") || el.querySelector("a");
+        if (link) link.click();
+      }
+    }).catch(() => {});
+  }
 
+  // Wait for XHR to fetch job details
+  await waitForNetworkIdle(page, { quietMs: 800, maxWaitMs: 6000, label: `card ${index}` });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 4 — Wait for right pane job content to fully render
+//
+// KEY INSIGHT (from screenshots): The title appears first, THEN the skeleton
+// loaders clear and the Apply button becomes visible. We wait for BOTH.
+// ─────────────────────────────────────────────────────────────────────────────
+async function waitForRightPane(page) {
+  // Wait for job title to appear (fast — renders first)
   const titleSelectors = [
     ".jobs-details__main-content h1",
     ".job-details-jobs-unified-top-card__job-title h1",
     ".jobs-unified-top-card__job-title h1",
-    ".t-24.t-bold.inline",
-    "h1.t-24",
     ".job-details-jobs-unified-top-card__job-title",
     ".jobs-unified-top-card__job-title",
+    ".job-view-layout h1",
+    "h1.t-24",
+    ".t-24.t-bold",
   ];
-  for (const sel of titleSelectors) {
+
+  const titleAppeared = await waitForElementReady(page, titleSelectors, {
+    label: "job title",
+    timeoutMs: 8000,
+    stabilizeMs: 200,
+  });
+
+  if (!titleAppeared) {
+    // Fallback: maybe the page navigated fully (not a SPA update) — check for apply CTA
+    const ctaVisible = await waitForElementReady(page, [
+      ".jobs-s-apply button",
+      ".jobs-apply-button",
+      ".artdeco-button--primary",
+    ], { label: "apply CTA fallback", timeoutMs: 4000, stabilizeMs: 0 });
+    return ctaVisible;
+  }
+
+  // Now wait for the skeleton loaders to clear
+  // These classes are what LinkedIn uses for skeleton loading states
+  const skeletonSelectors = [
+    ".ghost-animate",
+    ".jobs-ghost-fadein",
+    ".artdeco-skeleton",
+    "[data-placeholder-type]",
+    ".scaffold-finite-scroll__placeholder",
+  ];
+
+  // Give skeleton up to 15 seconds to clear (this is why manual works — you wait)
+  for (const sel of skeletonSelectors) {
     try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1000 })) {
-        title = (await el.innerText()).trim();
-        break;
+      const hasSkeletons = await page.locator(sel).count().catch(() => 0) > 0;
+      if (hasSkeletons) {
+        logger.info(`[JobSearch] ⏳ Waiting for skeleton (${sel}) to clear...`);
+        await page.waitForSelector(sel, { state: "hidden", timeout: 15000 }).catch(() => {
+          logger.warn(`[JobSearch] ⚠️ Skeleton ${sel} didn't clear after 15s — continuing`);
+        });
+        break; // Only need to wait for one class — they all clear together
       }
     } catch (_) {}
   }
+
+  // Also wait for the apply button area to appear (ensures it's rendered, not skeleton)
+  await waitForElementReady(page, [
+    ".jobs-s-apply",
+    ".jobs-apply-button",
+    ".jobs-unified-top-card__content--two-pane .artdeco-button",
+  ], { label: "apply area", timeoutMs: 8000, stabilizeMs: 0 });
+
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 5 — Read job title from the right pane
+// ─────────────────────────────────────────────────────────────────────────────
+async function readJobTitle(page) {
+  const selectors = [
+    ".jobs-details__main-content h1",
+    ".job-details-jobs-unified-top-card__job-title h1",
+    ".jobs-unified-top-card__job-title h1",
+    ".job-details-jobs-unified-top-card__job-title",
+    ".jobs-unified-top-card__job-title",
+    "h1.t-24",
+    ".t-24.t-bold",
+    "h1",
+  ];
+  for (const sel of selectors) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 1000 })) {
+        const text = (await el.innerText()).trim();
+        if (text) return text;
+      }
+    } catch (_) {}
+  }
+  return "";
+}
+
+async function readJobDetails(page) {
+  const title = await readJobTitle(page);
+  let company = "";
+  let location = "";
 
   const companySelectors = [
     ".job-details-jobs-unified-top-card__company-name a",
     ".job-details-jobs-unified-top-card__company-name",
     ".jobs-unified-top-card__company-name",
-    ".jobs-details-top-card__company-url",
   ];
   for (const sel of companySelectors) {
     try {
       const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1000 })) {
+      if (await el.isVisible({ timeout: 800 })) {
         company = (await el.innerText()).trim();
-        break;
+        if (company) break;
       }
     } catch (_) {}
   }
 
   const locationSelectors = [
-    ".job-details-jobs-unified-top-card__primary-description span:first-child",
     ".job-details-jobs-unified-top-card__bullet",
     ".jobs-unified-top-card__bullet",
-    ".jobs-details-top-card__exact-location",
+    ".job-details-jobs-unified-top-card__primary-description span",
   ];
   for (const sel of locationSelectors) {
     try {
       const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1000 })) {
+      if (await el.isVisible({ timeout: 800 })) {
         location = (await el.innerText()).trim();
-        break;
+        if (location) break;
       }
     } catch (_) {}
   }
 
-  const descriptionSelectors = [
-    "#job-details",
-    ".jobs-description__content",
-    ".jobs-description",
-    ".job-details-module",
-  ];
-  for (const sel of descriptionSelectors) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1000 })) {
-        description = (await el.innerText()).trim();
-        break;
-      }
-    } catch (_) {}
-  }
-
-  return { title, company, location, description };
+  return { title, company, location, description: "" };
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 5 — Find the Apply button and determine type
+// STEP 6 — Find the EXTERNAL "Apply" button (NOT Easy Apply)
+//
+// LinkedIn shows:
+//   "Easy Apply" → stays on LinkedIn (blue button, modal) — SKIP
+//   "Apply"      → opens company website in new tab — THIS IS WHAT WE WANT
+//
+// How to tell them apart:
+//   Easy Apply: button text = "Easy Apply" OR aria-label contains "Easy Apply"
+//   External:   button text = "Apply" only, OR opens external URL
 // ─────────────────────────────────────────────────────────────────────────────
-async function findApplyButton(page) {
-  // Wait for apply section to fully render after right pane loaded
-  await waitForElementReady(page, [
-    ".jobs-apply-button",
+async function findExternalApplyButton(page) {
+  // Quick check — scan all buttons in the job detail area
+  const containers = [
     ".jobs-s-apply",
-    ".jobs-details__main-content .artdeco-button",
-  ], { label: "apply button section", timeoutMs: 5000, stabilizeMs: 200 });
-
-  const portalSelectors = [
-    "a[href^='http']:not([href*='linkedin.com'])",
-    "button[aria-label*='company website']",
-    "button:has-text('Apply')",
-    "a:has-text('Apply')",
-    "[role='button']:has-text('Apply')",
-    "a[aria-label*='company website']",
-    "button[aria-label*='apply on company website']",
-    "a[aria-label*='apply on company website']",
-    "button:has-text('Apply on company website')",
-    "a:has-text('Apply on company website')",
-    "button:has-text('Continue')",
-    "a:has-text('Continue')",
-    "button[aria-label*='apply']",
-    "a[aria-label*='apply']",
-    ".jobs-s-apply button",
-    ".jobs-s-apply a",
-    ".jobs-apply-button",
-    ".jobs-details__main-content .artdeco-button--primary",
+    ".jobs-apply-button--top-card",
+    ".jobs-unified-top-card__content--two-pane",
+    ".jobs-details__main-content",
+    ".job-view-layout",
   ];
 
-  let applyBtn = null;
-
-  for (const sel of portalSelectors) {
+  for (const containerSel of containers) {
     try {
-      const els = await page.$$(sel);
-      for (const el of els) {
-        if (!(await el.isVisible().catch(() => false))) continue;
-        const txt = ((await el.innerText().catch(() => "")) || "").toLowerCase();
-        const aria = ((await el.getAttribute("aria-label").catch(() => "")) || "").toLowerCase();
-        const href = ((await el.getAttribute("href").catch(() => "")) || "").trim();
+      const containerEl = page.locator(containerSel).first();
+      if (!(await containerEl.isVisible({ timeout: 500 }).catch(() => false))) continue;
 
-        const combinedText = `${txt} ${aria}`;
-        const isEasyApply = /easy apply/.test(combinedText);
-        const isExternalLink = /^https?:\/\//.test(href) && !href.includes("linkedin.com");
-        const isPortalText = /(company website|apply on company website|visit company website|external application|continue)/.test(combinedText);
-        const isApplyText = /\bapply\b/.test(combinedText);
+      const buttons = await containerEl.locator("button, a[href]").all().catch(() => []);
+      for (const btn of buttons) {
+        try {
+          if (!(await btn.isVisible({ timeout: 300 }).catch(() => false))) continue;
 
-        if (isEasyApply) continue;
+          const text = ((await btn.innerText().catch(() => "")) || "").trim().toLowerCase();
+          const aria = ((await btn.getAttribute("aria-label").catch(() => "")) || "").trim().toLowerCase();
+          const href = ((await btn.getAttribute("href").catch(() => "")) || "").trim();
 
-        if (isExternalLink || isPortalText || (isApplyText && !isEasyApply)) {
-          applyBtn = el;
-          break;
+          // SKIP Easy Apply (both text-based and aria-based checks)
+          const isEasyApply =
+            text === "easy apply" ||
+            aria.includes("easy apply") ||
+            /easy\s+apply/i.test(text) ||
+            /easy\s+apply/i.test(aria);
+
+          if (isEasyApply) {
+            logger.info(`[JobSearch] ⏭  Easy Apply found — skipping: "${text || aria}"`);
+            continue;
+          }
+
+          // ACCEPT if button says "Apply" (not easy apply)
+          const isApplyBtn = text === "apply" || text.startsWith("apply") || aria === "apply" || /\bapply\b/.test(aria);
+          // OR if it's an external link
+          const isExternalLink = href.startsWith("http") && !href.includes("linkedin.com");
+
+          if (isApplyBtn || isExternalLink) {
+            logger.info(`[JobSearch] ✅ External Apply button: "${text || aria}" href="${href}" in ${containerSel}`);
+            return await btn.elementHandle();
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  // Fallback: try direct CSS selectors for common LinkedIn external apply patterns
+  const fallbackSelectors = [
+    "button:has-text('Apply on company website')",
+    "a:has-text('Apply on company website')",
+    "button[aria-label*='company website']",
+    "a[href^='http']:not([href*='linkedin.com'])",
+    ".jobs-s-apply button:not([aria-label*='Easy'])",
+    ".jobs-apply-button:not([aria-label*='Easy'])",
+  ];
+
+  for (const sel of fallbackSelectors) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 500 }).catch(() => false)) {
+        const text = ((await el.innerText().catch(() => "")) || "").trim();
+        const aria = ((await el.getAttribute("aria-label").catch(() => "")) || "").trim();
+        if (!/easy\s*apply/i.test(`${text} ${aria}`)) {
+          logger.info(`[JobSearch] ✅ Apply button (fallback): "${text || aria}" via ${sel}`);
+          return await el.elementHandle();
         }
       }
     } catch (_) {}
-    if (applyBtn) break;
   }
 
-  // --- GEMINI FALLBACK (AGENTIC SELECTION) ---
-  if (!applyBtn) {
-    logger.info(`[JobSearch] Standard selectors failed. Invoking Gemini AI to find Apply button...`);
-    try {
-      // Extract visible buttons and links from the right pane
-      const elements = await page.$$eval(".job-view-layout button, .job-view-layout a, .jobs-search__job-details--container button, .jobs-search__job-details--container a, .jobs-details__main-content button, .jobs-details__main-content a", els => {
-        return els.filter(el => {
-          const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
-        }).map((el, index) => {
-          return {
-            id: index,
-            tag: el.tagName,
-            text: (el.innerText || "").trim(),
-            ariaLabel: (el.getAttribute('aria-label') || "").trim(),
-            href: (el.getAttribute('href') || "").trim()
-          };
-        }).filter(e => (e.text.length > 0 || e.ariaLabel.length > 0) && (e.text.length < 100 && e.ariaLabel.length < 100));
-      });
+  // AI fallback — ask Gemini to identify the button
+  try {
+    logger.info(`[JobSearch] 🤖 AI scan for Apply button...`);
+    const elements = await page.$$eval(
+      ".jobs-s-apply button, .jobs-s-apply a, .jobs-apply-button, " +
+      ".jobs-details__main-content button, .jobs-details__main-content a[href]",
+      (els) => els
+        .filter((el) => el.offsetWidth > 0 && window.getComputedStyle(el).display !== "none")
+        .slice(0, 20)
+        .map((el, i) => ({
+          id: i,
+          tag: el.tagName,
+          text: (el.innerText || "").trim(),
+          aria: (el.getAttribute("aria-label") || "").trim(),
+          href: (el.getAttribute("href") || "").trim(),
+        }))
+        .filter((e) => e.text.length < 80 || e.aria.length < 80)
+    );
 
-      if (elements.length > 0) {
-        const prompt = `You are an expert at analyzing web page elements. Below is a JSON list of visible buttons and links from a job posting page.
-Which one represents the button to apply externally on the company website (usually just "Apply" or "Apply on company website")?
-STRICT RULE: DO NOT select any button that says "Easy Apply". The user ONLY wants to apply on the original company portal page.
+    if (elements.length > 0) {
+      const resp = await callGemini([{
+        role: "user",
+        content: `From these LinkedIn job page elements, find the "Apply" button that opens the COMPANY portal (external website). SKIP any "Easy Apply" button. Return only the JSON of the matching element, or {} if only Easy Apply exists.\n\n${JSON.stringify(elements)}`,
+      }], 150);
 
-Respond ONLY with the exact JSON object of the matched element from the list. If none match or if only "Easy Apply" is available, respond with {}.
-
-Elements:
-${JSON.stringify(elements, null, 2)}`;
-        
-        const responseText = await callGemini([{role: 'user', content: prompt}], 150);
-        const match = responseText.match(/\{[\s\S]*\}/);
-        
-        if (match) {
-          const selected = JSON.parse(match[0]);
-          if (selected.id !== undefined) {
-            logger.info(`[JobSearch] Gemini identified button: "${selected.text || selected.ariaLabel}" (Tag: ${selected.tag})`);
-            
-            // Re-find the element in Playwright
-            const matchedEls = await page.$$(`.job-view-layout ${selected.tag.toLowerCase()}, .jobs-search__job-details--container ${selected.tag.toLowerCase()}, .jobs-details__main-content ${selected.tag.toLowerCase()}`);
-            for (let el of matchedEls) {
-              const text = (await el.innerText().catch(() => "")).trim();
-              const aria = (await el.getAttribute('aria-label').catch(() => "")).trim();
-              
-              if ((text && text === selected.text) || (aria && aria === selected.ariaLabel)) {
-                applyBtn = el;
-                break;
-              }
+      const found = resp.match(/\{[^}]+\}/);
+      if (found) {
+        const sel = JSON.parse(found[0]);
+        if (sel.id !== undefined && !/easy\s*apply/i.test(`${sel.text} ${sel.aria}`)) {
+          const all = await page.$$(`.jobs-s-apply ${sel.tag.toLowerCase()}, .jobs-details__main-content ${sel.tag.toLowerCase()}`);
+          for (const el of all) {
+            const t = (await el.innerText().catch(() => "")).trim();
+            const a = (await el.getAttribute("aria-label").catch(() => "")).trim();
+            if ((sel.text && t === sel.text) || (sel.aria && a === sel.aria)) {
+              if (!/easy\s*apply/i.test(`${t} ${a}`)) return el;
             }
           }
         }
       }
-    } catch (e) {
-      logger.warn(`[JobSearch] Gemini fallback failed: ${e.message}`);
     }
+  } catch (e) {
+    logger.warn(`[JobSearch] AI fallback error: ${e.message}`);
   }
 
-  return { applyBtn, isEasyApply: false };
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 6A — Handle Easy Apply (LinkedIn built-in modal)
+// STEP 7 — Click Apply and capture company portal tab
 // ─────────────────────────────────────────────────────────────────────────────
-async function handleEasyApply(page, jobTitle, userData) {
-  logger.info(`[JobSearch] 🟡 Easy Apply detected for '${jobTitle}'. Opening modal...`);
-
-  const { applyBtn } = await findApplyButton(page);
-  if (!applyBtn) {
-    logger.warn(`[JobSearch] Easy Apply button disappeared for '${jobTitle}'.`);
-    return false;
-  }
-
-  // Click the Easy Apply button
-  try {
-    await applyBtn.click({ force: true, timeout: 10000 });
-  } catch (_) {
-    await applyBtn.evaluate((el) => el.click());
-  }
-
-  // ✅ Smart: wait for modal to fully open + network idle + all form fields rendered
-  const modalReady = await waitForModalReady(page);
-
-  if (!modalReady) {
-    logger.warn(`[JobSearch] Easy Apply modal did not fully open for '${jobTitle}'.`);
-    return false;
-  }
-
-  logger.info(`[JobSearch] ✅ Easy Apply modal open. Filling fields...`);
-
-  const modal = page.locator(".jobs-easy-apply-modal, [data-test-modal], .artdeco-modal--layer-default").first();
-
-  // Fill phone
-  if (userData.phone) {
-    try {
-      const phoneInput = modal.locator(
-        "input[id*='phoneNumber'], input[name*='phone'], input[autocomplete*='tel']"
-      ).first();
-      if (await phoneInput.isVisible({ timeout: 2000 })) {
-        await phoneInput.triple_click().catch(() => {});
-        await phoneInput.fill(userData.phone);
-        logger.info(`[JobSearch]   ✔ Filled phone: ${userData.phone}`);
-        await adaptivePause(page, 400, 0.3, "after phone fill");
-      }
-    } catch (_) {}
-  }
-
-  // Fill city / location
-  if (userData.location) {
-    try {
-      const cityInput = modal.locator(
-        "input[id*='city'], input[id*='location'], input[placeholder*='City']"
-      ).first();
-      if (await cityInput.isVisible({ timeout: 2000 })) {
-        await cityInput.fill(userData.location);
-        logger.info(`[JobSearch]   ✔ Filled location: ${userData.location}`);
-        await adaptivePause(page, 400, 0.3, "after location fill");
-      }
-    } catch (_) {}
-  }
-
-  // Fill email if shown
-  if (userData.email) {
-    try {
-      const emailInput = modal.locator("input[type='email'], input[id*='email']").first();
-      if (await emailInput.isVisible({ timeout: 2000 })) {
-        await emailInput.fill(userData.email);
-        logger.info(`[JobSearch]   ✔ Filled email: ${userData.email}`);
-        await adaptivePause(page, 400, 0.3, "after email fill");
-      }
-    } catch (_) {}
-  }
-
-  logger.info(`[JobSearch] ✅ Easy Apply modal filled for '${jobTitle}'. Left open for your review before submitting.`);
-  return true;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STEP 6B — Handle External Portal Apply (opens new tab)
-// ─────────────────────────────────────────────────────────────────────────────
-async function handlePortalApply(page, jobTitle, applyBtn, userData) {
-  logger.info(`[JobSearch] 🔵 External Portal Apply for '${jobTitle}'. Clicking...`);
+async function openCompanyPortal(page, jobTitle, applyBtn, userData) {
+  logger.info(`[JobSearch] 🔵 Opening company portal for "${jobTitle}"...`);
   const context = page.context();
-  let newPage = null;
+  let portalPage = null;
 
   try {
     await applyBtn.scrollIntoViewIfNeeded().catch(() => {});
-    await applyBtn.hover().catch(() => {});
-    await adaptivePause(page, 700, 0.3, "before portal click");
+    await page.waitForTimeout(400);
 
     const currentUrl = page.url();
+    const href = ((await applyBtn.getAttribute("href").catch(() => "")) || "").trim();
 
-    const clickTask = (async () => {
-      try {
-        await applyBtn.click({ force: true, timeout: 15000 });
-      } catch (_) {
-        try {
-          await applyBtn.evaluate((el) => {
-            try { el.click(); } catch (e) { window.open(el.href || '', '_blank', 'noopener'); }
-          });
-        } catch (_) {}
-      }
-    })();
+    // Listen for new tab BEFORE clicking
+    const newTabPromise = context.waitForEvent("page", { timeout: 15000 }).catch(() => null);
 
-    const newPagePromise = context.waitForEvent("page", { timeout: 12000 }).catch(() => null);
-    const navigationPromise = page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 12000 }).catch(() => null);
-
-    await clickTask;
-    const [tab, navResult] = await Promise.all([newPagePromise, navigationPromise]);
-
-    if (tab) {
-      newPage = tab;
-    } else if (navResult && page.url() !== currentUrl) {
-      logger.info(`[JobSearch] Company portal opened in the same tab.`);
-      newPage = page;
+    // Click the apply button
+    try {
+      await applyBtn.click({ force: true, timeout: 10000 });
+    } catch (_) {
+      await applyBtn.evaluate((el) => {
+        try { el.click(); } catch (e) { if (el.href) window.open(el.href, "_blank"); }
+      }).catch(() => {});
     }
 
-    if (!newPage) {
-      logger.info(`[JobSearch] No immediate page open — checking for Continue modal or href fallback...`);
-      await waitForNetworkIdle(page, { quietMs: 1200, maxWaitMs: 5000, label: "portal modal" });
+    await page.waitForTimeout(2500);
+    portalPage = await newTabPromise;
 
-      const modalBtns = [
+    // If no new tab: check if same-tab navigation happened
+    if (!portalPage && page.url() !== currentUrl && !page.url().includes("linkedin.com/jobs")) {
+      logger.info(`[JobSearch] Portal opened in same tab`);
+      portalPage = page;
+    }
+
+    // LinkedIn sometimes shows a "Continue" confirmation modal before opening the portal
+    if (!portalPage) {
+      await waitForNetworkIdle(page, { quietMs: 800, maxWaitMs: 4000, label: "modal wait" });
+      const confirmBtns = [
         "button:has-text('Continue')",
         "button:has-text('Apply on company website')",
         "a:has-text('Apply on company website')",
         ".artdeco-modal button.artdeco-button--primary",
-        "[role='button']:has-text('Apply')",
       ];
-      for (const sel of modalBtns) {
-        try {
-          const btn = page.locator(sel).first();
-          if (await btn.isVisible({ timeout: 2000 })) {
-            logger.info(`[JobSearch] Clicking modal fallback button: ${sel}`);
-            await btn.click({ force: true, timeout: 10000 });
-            const [tab2, nav2] = await Promise.all([
-              context.waitForEvent("page", { timeout: 15000 }).catch(() => null),
-              page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null),
-            ]);
-            if (tab2) {
-              newPage = tab2;
-            } else if (nav2 && page.url() !== currentUrl) {
-              newPage = page;
-            }
-            break;
-          }
-        } catch (_) {}
-      }
-    }
-
-    if (!newPage) {
-      const href = ((await applyBtn.getAttribute("href").catch(() => "")) || "").trim();
-      if (href && href.startsWith("http") && !href.includes("linkedin.com")) {
-        logger.info(`[JobSearch] Using href fallback to open portal: ${href}`);
-        newPage = await context.newPage();
-        await newPage.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
-      } else if (href && href.startsWith("/")) {
-        const absoluteHref = new URL(href, page.url()).toString();
-        if (!absoluteHref.includes("linkedin.com")) {
-          logger.info(`[JobSearch] Using relative href fallback: ${absoluteHref}`);
-          newPage = await context.newPage();
-          await newPage.goto(absoluteHref, { waitUntil: "domcontentloaded", timeout: 30000 });
+      for (const sel of confirmBtns) {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+          logger.info(`[JobSearch] Clicking confirm modal: ${sel}`);
+          const newTab2 = context.waitForEvent("page", { timeout: 12000 }).catch(() => null);
+          await btn.click({ force: true }).catch(() => {});
+          await page.waitForTimeout(2000);
+          portalPage = await newTab2;
+          if (!portalPage && page.url() !== currentUrl) portalPage = page;
+          break;
         }
       }
     }
+
+    // Last resort: open href directly
+    if (!portalPage && href && href.startsWith("http") && !href.includes("linkedin.com")) {
+      logger.info(`[JobSearch] Direct href fallback: ${href}`);
+      portalPage = await context.newPage();
+      await portalPage.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
+    }
+
   } catch (err) {
-    logger.warn(`[JobSearch] Portal apply click error: ${err.message}`);
+    logger.warn(`[JobSearch] Portal click error: ${err.message}`);
   }
 
-  if (!newPage) {
-    logger.warn(`[JobSearch] No new tab captured for '${jobTitle}'.`);
+  if (!portalPage) {
+    logger.warn(`[JobSearch] ❌ Could not open portal for "${jobTitle}"`);
     return { success: false, url: "" };
   }
 
-  logger.info(`[JobSearch] ✅ Company portal opened: ${newPage.url()}`);
+  const portalUrl = portalPage.url();
+  logger.info(`[JobSearch] ✅ Portal opened: ${portalUrl}`);
 
-  // ✅ Smart: wait for portal page to fully load (network idle + form elements stable)
-  logger.info(`[JobSearch] ⏳ Waiting for portal page to fully load...`);
-  await newPage.waitForLoadState("domcontentloaded").catch(() => {});
+  // Wait for portal to load (use portalPage — NOT page — to avoid wrong tab wait)
+  await portalPage.waitForLoadState("domcontentloaded").catch(() => {});
+  await waitForNetworkIdle(portalPage, { quietMs: 2000, maxWaitMs: 12000, label: "portal load" });
+  await portalPage.waitForTimeout(1500);
 
-  // Network idle on the new portal page
-  await waitForNetworkIdle(newPage, {
-    quietMs: 2000,
-    maxWaitMs: 15000,
-    label: "company portal page",
-  });
-
-  // Wait for form inputs to appear and stabilize
-  await waitForDOMStable(newPage, [
-    "input[type='text']",
-    "input[type='email']",
-    "input[name]",
-    "form",
-    "textarea",
-  ], {
-    pollMs: 400,
-    stableChecks: 2,
-    maxWaitMs: 8000,
-    label: "portal form fields",
-  });
-
-  // Small human read-pause before filling
-  await adaptivePause(newPage, 1200, 0.3, "human reading portal page");
-
-  const portalUrl = newPage.url();
   try {
-    const result = await autofillPortalForm(newPage, userData);
+    const result = await autofillPortalForm(portalPage, userData);
     if (result.success) {
-      logger.info(`[JobSearch] ✅ Portal form filled for '${jobTitle}'. Tab left open for review.`);
+      logger.info(`[JobSearch] ✅ Portal form filled for "${jobTitle}"`);
       return { success: true, url: portalUrl };
-    } else {
-      logger.warn(`[JobSearch] Portal form fill failed: ${result.error}`);
-      return { success: false, url: portalUrl };
     }
+    logger.warn(`[JobSearch] Form fill result: ${result.error}`);
+    return { success: false, url: portalUrl };
   } catch (e) {
     logger.warn(`[JobSearch] autofillPortalForm error: ${e.message}`);
     return { success: false, url: portalUrl };
@@ -832,176 +644,147 @@ async function handlePortalApply(page, jobTitle, applyBtn, userData) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MAIN EXPORT
+// MAIN — autoApplyJobs
 // ─────────────────────────────────────────────────────────────────────────────
 async function autoApplyJobs(userData, jobKeywords, location, allowedTitles) {
-  const page = getPage();
+  const page    = getPage();
   const browser = getBrowser();
 
   if (!page || !browser) {
-    throw new Error("Browser is not initialized. Please login first.");
+    throw new Error("Browser not initialized. Please login to LinkedIn first.");
   }
 
   const keywordsStr = encodeURIComponent(jobKeywords.join(" "));
 
-  // ── Navigate to filtered jobs with full smart pauses ──────────────────
-  const navSuccess = await navigateToFilteredJobs(page, keywordsStr, location);
-  
-  if (!navSuccess) {
-    logger.error(`[JobSearch] ❌ Failed to navigate to job search. Aborting.`);
-    return { success: false, message: "Failed to navigate to job search. LinkedIn may be blocking or region unavailable." };
+  // ── 1. Navigate to search ────────────────────────────────────────────────
+  const navOk = await navigateToLinkedInSearch(page, keywordsStr, location);
+  if (!navOk) {
+    return { success: false, message: "Failed to load LinkedIn job search. Check your internet connection or try different keywords." };
   }
 
-  // ── Wait for job cards (smart — not a fixed timeout) ──────────────────
-  logger.info(`[JobSearch] ── Final check: job cards on screen...`);
-  const cardsVisible = await waitForJobCards(page, 1);
+  // ── 2. Wait for job cards ────────────────────────────────────────────────
+  logger.info(`[JobSearch] ⏳ Waiting for job cards...`);
+  const cardCount = await waitForJobCards(page, 1);
 
-  if (cardsVisible === 0) {
-    logger.warn(`[JobSearch] ⚠️ No job cards on first check. Running full diagnostics...`);
-    await diagnosePage(page, "after failed waitForJobCards");
-    return { success: false, message: "No jobs found. LinkedIn may have no matching results or region restrictions apply." };
+  if (cardCount === 0) {
+    logger.warn(`[JobSearch] No job cards found. URL: ${page.url()}`);
+    return { success: false, message: "No job listings found. Try different keywords or location." };
   }
 
-  // ── Slowly scroll to load all cards ────────────────────────────────────
-  await scrollJobsPane(page, 6);
+  // ── 3. Dismiss overlays and scroll to load all cards ─────────────────────
+  await dismissOverlays(page);
+  await scrollJobsPane(page, 4);
 
-  // Collect all visible job cards as locators (avoids stale element handles
-  // when LinkedIn navigates during a click)
-  const jobCards = page.locator(JOB_CARD_SELECTORS);
-  const jobCardCount = await jobCards.count();
-  logger.info(`[JobSearch] 📋 Total job cards loaded: ${jobCardCount}`);
+  // Pick ONE non-duplicating selector (fixes the double-counting bug)
+  const { selector: cardSel, count: totalCards } = await resolveJobCardSelector(page);
+  logger.info(`[JobSearch] 📋 Total cards: ${totalCards} via "${cardSel}"`);
 
-  let fallbackMode = false;
-  if (jobCardCount === 0) {
-    const { applyBtn } = await findApplyButton(page);
-    if (applyBtn) {
-      logger.info(`[JobSearch] ⚠️ Job list empty, but Apply button visible in right pane. Using fallback mode.`);
-      fallbackMode = true;
-    } else {
-      return { success: false, message: "No job cards found." };
-    }
+  if (totalCards === 0) {
+    return { success: false, message: "Job cards disappeared after scrolling." };
   }
 
-  let appliedCount = 0;
-  let skippedCount = 0;
-  let easyApplyCount = 0;
-  let portalCount = 0;
-  let processedJobs = [];
+  // Use a SINGLE locator with the resolved selector — ensures nth(i) is always accurate
+  const cards = page.locator(cardSel);
 
-  // ── Process each job card ──────────────────────────────────────────────
-  const totalIterations = fallbackMode ? 1 : jobCardCount;
-  for (let i = 0; i < totalIterations; i++) {
-    logger.info(`\n[JobSearch] ════ Job ${i + 1} / ${totalIterations} ════`);
+  // ── 4. Process each job card ─────────────────────────────────────────────
+  let applied = 0;
+  let skipped = 0;
+  const results = [];
 
-    // ── Dismiss overlays BEFORE clicking (prevents clicking the chat by mistake) ──
+  for (let i = 0; i < totalCards; i++) {
+    logger.info(`\n[JobSearch] ════ Job ${i + 1}/${totalCards} ════`);
+
     await dismissOverlays(page);
 
+    // Get href for force-navigation fallback
+    const card = cards.nth(i);
     let jobHref = "";
-    // ── Click the card (skip in fallback mode) ─────────────────────────
-    if (!fallbackMode) {
-      try {
-        const card = jobCards.nth(i);
-        // Extract href for deep-fix fallback
-        jobHref = await card.getAttribute('href').catch(() => "");
-        if (!jobHref) {
-           jobHref = await card.locator('a').first().getAttribute('href').catch(() => "");
-        }
+    try {
+      jobHref = await card.getAttribute("href").catch(() => "");
+      if (!jobHref) jobHref = await card.locator("a").first().getAttribute("href").catch(() => "");
+    } catch (_) {}
 
-        const navigated = await clickJobCard(page, card, i + 1);
-        if (!navigated) {
-          logger.info(`[JobSearch] Card ${i + 1} clicked without leaving the results page.`);
-        }
-      } catch (err) {
-        logger.warn(`[JobSearch] Card ${i + 1} click failed: ${err.message}`);
-        skippedCount++;
+    // Click the card
+    await clickJobCard(page, card, i + 1);
+    await dismissOverlays(page);
+
+    // Wait for right pane to fully render (title + skeleton clear + apply area)
+    let paneReady = await waitForRightPane(page);
+
+    // If pane still not ready and we have a direct URL, force navigate
+    if (!paneReady && jobHref) {
+      const fullUrl = jobHref.startsWith("http") ? jobHref : `https://www.linkedin.com${jobHref}`;
+      logger.warn(`[JobSearch] Pane hung — navigating directly to: ${fullUrl}`);
+      try {
+        await page.goto(fullUrl, { waitUntil: "domcontentloaded", timeout: 40000 });
+        await waitForNetworkIdle(page, { quietMs: 1500, maxWaitMs: 10000, label: "direct job nav" });
+        await dismissOverlays(page);
+        paneReady = await waitForRightPane(page);
+      } catch (e) {
+        logger.warn(`[JobSearch] Direct navigation failed: ${e.message}`);
+      }
+    }
+
+    if (!paneReady) {
+      logger.warn(`[JobSearch] Pane not ready for card ${i + 1}. Skipping.`);
+      skipped++;
+      results.push({ title: "Unknown", status: "Skipped - Pane not ready" });
+      continue;
+    }
+
+    // Read job details
+    const jobDetails = await readJobDetails(page);
+    const title = jobDetails.title;
+
+    if (!title) {
+      logger.warn(`[JobSearch] No title for card ${i + 1}. Skipping.`);
+      skipped++;
+      results.push({ title: "Unknown", status: "Skipped - No title" });
+      continue;
+    }
+
+    logger.info(`[JobSearch] 📌 "${title}" at "${jobDetails.company}"`);
+
+    // Check allowed titles
+    if (allowedTitles && allowedTitles.length > 0) {
+      const allowed = allowedTitles.some((t) => title.toLowerCase().includes(t.toLowerCase()));
+      if (!allowed) {
+        logger.info(`[JobSearch] ⏭  Title "${title}" not in allowed list. Skipping.`);
+        skipped++;
+        results.push({ ...jobDetails, status: "Skipped - Title not allowed" });
+        await page.waitForTimeout(400);
         continue;
       }
     }
 
-    // ── Dismiss overlays again just in case new ones appeared ─────────
-    await dismissOverlays(page);
-
-    // ── Wait for right pane to fully load (SMART — not a fixed sleep) ─
-    let rightPaneReady = await waitForRightPane(page);
-    
-    // IN-DEPTH FIX: If the SPA hangs on the skeleton loader, force navigate to the job URL
-    if (!rightPaneReady && jobHref && !fallbackMode) {
-      logger.warn(`[JobSearch] Right pane hung. IN-DEPTH FIX: Force-navigating to job URL...`);
-      const fullUrl = jobHref.startsWith('http') ? jobHref : `https://www.linkedin.com${jobHref}`;
-      
-      try {
-        await page.goto(fullUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-        await waitForNetworkIdle(page, { quietMs: 1500, maxWaitMs: 12000, label: "force-loaded job page" });
-        await dismissOverlays(page);
-        rightPaneReady = await waitForRightPane(page);
-      } catch (navErr) {
-        logger.warn(`[JobSearch] Force navigation failed: ${navErr.message}`);
-      }
-    }
-
-    if (!rightPaneReady) {
-      logger.warn(`[JobSearch] Right pane did not load for card ${i + 1}. Skipping.`);
-      skippedCount++;
-      continue;
-    }
-
-    // ── Read job details ───────────────────────────────────────────────
-    const jobDetails = await readJobDetails(page);
-    const jobTitle = jobDetails.title;
-    if (!jobTitle) {
-      logger.warn(`[JobSearch] Could not read title for card ${i + 1}. Skipping.`);
-      skippedCount++;
-      processedJobs.push({ title: "Unknown", company: "", location: "", applyLink: "", description: "", status: "Skipped - Missing title" });
-      continue;
-    }
-    logger.info(`[JobSearch] 📌 Job: "${jobTitle}" at "${jobDetails.company}"`);
-
-    // ── Check allowed titles ───────────────────────────────────────────
-    const isAllowed = allowedTitles.some((t) =>
-      jobTitle.toLowerCase().includes(t.toLowerCase())
-    );
-    if (!isAllowed) {
-      logger.info(`[JobSearch] ⏭  Skipping — title not in allowed list`);
-      skippedCount++;
-      processedJobs.push({ ...jobDetails, applyLink: "", status: "Skipped - Title not allowed" });
-      // Short pause before next card (human-like browsing rhythm)
-      await adaptivePause(page, 600, 0.3, "skip pause");
-      continue;
-    }
-
-    // ── Find Apply button ──────────────────────────────────────────────
-    const { applyBtn } = await findApplyButton(page);
+    // Find external Apply button
+    const applyBtn = await findExternalApplyButton(page);
 
     if (!applyBtn) {
-      logger.info(`[JobSearch] ⏭  Skipping '${jobTitle}' — no external portal Apply button found (Easy Apply only or premium).`);
-      skippedCount++;
-      processedJobs.push({ ...jobDetails, applyLink: "", status: "Skipped - Portal apply only" });
+      logger.info(`[JobSearch] ⏭  No external Apply button for "${title}" (Easy Apply only or no apply). Skipping.`);
+      skipped++;
+      results.push({ ...jobDetails, status: "Skipped - Easy Apply only" });
       continue;
     }
 
-    // ── Apply via external portal only ───────────────────────────────────
-    const portalRes = await handlePortalApply(page, jobTitle, applyBtn, userData);
-    if (portalRes.success) {
-      appliedCount++;
-      portalCount++;
-      logger.info(`[JobSearch] ✅ Portal applied: ${portalCount} so far`);
-      processedJobs.push({ ...jobDetails, applyLink: portalRes.url, status: "External Portal Opened" });
+    // Open company portal and fill form
+    const portalResult = await openCompanyPortal(page, title, applyBtn, userData);
+    if (portalResult.success) {
+      applied++;
+      logger.info(`[JobSearch] ✅ Applied: ${applied} total`);
+      results.push({ ...jobDetails, applyLink: portalResult.url, status: "Applied - Portal Opened" });
     } else {
-      skippedCount++;
-      processedJobs.push({ ...jobDetails, applyLink: portalRes.url, status: "Skipped - Portal Apply Failed" });
+      skipped++;
+      results.push({ ...jobDetails, applyLink: portalResult.url, status: "Skipped - Portal Failed" });
     }
 
-    // ── Smart pause between jobs ────────────────────────────────────────
-    // Wait for any background LinkedIn XHR triggered by the apply action to settle,
-    // then add a human-like reading/thinking pause before the next card.
-    logger.info(`[JobSearch] ⏳ Settling before next job...`);
-    await smartWait(page, "between jobs", 500, 1500);
+    // Pause between jobs (human-like)
+    await page.waitForTimeout(800 + Math.random() * 1000);
   }
 
-  const summary = `Applied: ${appliedCount} (EasyApply: ${easyApplyCount}, Portal: ${portalCount}), Skipped: ${skippedCount} out of ${jobCardCount} jobs`;
+  const summary = `Applied: ${applied}, Skipped: ${skipped} out of ${totalCards} jobs`;
   logger.info(`[JobSearch] ════ DONE ════ ${summary}`);
-
-  return { success: true, message: summary, processedJobs };
+  return { success: true, message: summary, processedJobs: results };
 }
 
 module.exports = { autoApplyJobs };

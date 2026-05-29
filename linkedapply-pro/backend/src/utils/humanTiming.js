@@ -329,32 +329,48 @@ async function waitForRightPaneUpdate(page, previousTitle = "") {
     label: "right pane XHR",
   });
 
-  // Then wait for the title element to appear
+  // Wait for the job title to appear — covers 2024/2025 LinkedIn UI redesign
   const titleSelectors = [
     ".jobs-details__main-content h1",
     ".job-details-jobs-unified-top-card__job-title h1",
     ".jobs-unified-top-card__job-title h1",
     ".jobs-unified-top-card__job-title",
+    ".job-details-jobs-unified-top-card__job-title",
     ".job-view-layout h1",
     "h1.t-24",
     ".t-24.t-bold",
+    "[data-test-job-title]",
+    ".topcard__title",
   ];
 
   const appeared = await waitForElementReady(page, titleSelectors, {
     label: "job title h1",
-    timeoutMs: 5000,
-    stabilizeMs: 150, // Wait for any CSS slide-in animation
+    timeoutMs: 6000,
+    stabilizeMs: 200,
   });
 
   if (appeared) {
-    // IN-DEPTH FIX: Even if title appeared, wait for the skeleton/ghost loaders to disappear.
-    // If they stay, the page is hung.
+    // SOFT skeleton check: skeleton loaders sometimes persist on certain LinkedIn
+    // themes even when the job detail is fully rendered. Do NOT hard-fail here.
     try {
-      await page.waitForSelector('.ghost-animate, .jobs-ghost-fadein, .artdeco-skeleton', { state: 'hidden', timeout: 5000 });
-    } catch (e) {
-      logger.warn(`[Timing] ⚠️ Skeleton loader never disappeared. Right pane is hung.`);
-      return false; 
-    }
+      const skeletonStillVisible = await page
+        .locator(".ghost-animate, .jobs-ghost-fadein, .artdeco-skeleton")
+        .first()
+        .isVisible({ timeout: 800 })
+        .catch(() => false);
+
+      if (skeletonStillVisible) {
+        // Give it up to 3s to clear; if it doesn't, proceed anyway
+        await page
+          .waitForSelector(".ghost-animate, .jobs-ghost-fadein, .artdeco-skeleton", {
+            state: "hidden",
+            timeout: 3000,
+          })
+          .catch(() => {
+            logger.warn(`[Timing] ⚠️ Skeleton still showing but title visible — proceeding`);
+          });
+      }
+    } catch (_) {}
     return true;
   }
 
@@ -364,7 +380,9 @@ async function waitForRightPaneUpdate(page, previousTitle = "") {
     ".jobs-s-apply",
     ".jobs-apply-button",
     ".jobs-details__main-content .artdeco-button",
+    ".jobs-unified-top-card__content--two-pane .artdeco-button",
     "a[href*='apply']",
+    "button[aria-label*='apply']",
   ], {
     label: "apply CTA fallback",
     timeoutMs: 4000,

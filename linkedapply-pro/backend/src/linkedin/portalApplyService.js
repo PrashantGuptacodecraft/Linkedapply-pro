@@ -82,7 +82,7 @@ async function autofillPortalForm(portalPage, userData) {
               return true;
             } else {
               // Fallback: use paste method
-              await el.triple_click().catch(() => {});
+              await el.tripleClick().catch(() => {});
               await portalPage.keyboard.press("Delete");
               await el.type(String(value), { delay: 10 });
               logger.info(`[PortalApply] ✔ Filled (paste method) ${fieldName || "field"}: ${sel}`);
@@ -242,7 +242,7 @@ async function autofillPortalForm(portalPage, userData) {
     // Resolve resume path
     let resumePath = userData.resumePath || null;
     if (!resumePath) {
-      const uploadsDir = path.resolve(__dirname, "../../../../uploads");
+      const uploadsDir = path.resolve(__dirname, "../../../uploads");
       if (fs.existsSync(uploadsDir)) {
         const files = fs
           .readdirSync(uploadsDir)
